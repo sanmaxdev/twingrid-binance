@@ -1,13 +1,14 @@
 """Basket history and forensics endpoints per Phase 6."""
 
+from datetime import UTC
 from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import get_db, get_current_user, get_tenant_scope
-from app.models.user import User
+from app.api.deps import get_db, get_tenant_scope
 from app.models.account import Account
 from app.models.basket import Basket
 from app.models.order import Order
@@ -123,9 +124,12 @@ async def get_basket_forensics(
         raise HTTPException(status_code=404, detail="Account not found")
 
     result = await db.execute(
-        select(Basket).where(
-            Basket.id == basket_id, Basket.account_id == account_id,
-        ).options(selectinload(Basket.orders))
+        select(Basket)
+        .where(
+            Basket.id == basket_id,
+            Basket.account_id == account_id,
+        )
+        .options(selectinload(Basket.orders))
     )
     basket = result.scalars().first()
     if not basket:
@@ -146,10 +150,14 @@ async def get_basket_forensics(
         "sos_filled": basket.sos_filled,
         "avg_entry": float(basket.avg_entry) if basket.avg_entry is not None else None,
         "qty": float(basket.qty) if basket.qty is not None else None,
-        "notional_total": float(basket.notional_total) if basket.notional_total is not None else None,
+        "notional_total": float(basket.notional_total)
+        if basket.notional_total is not None
+        else None,
         "tp_target_usd": float(basket.tp_target_usd) if basket.tp_target_usd is not None else None,
         "tp_price": float(basket.tp_price) if basket.tp_price is not None else None,
-        "liquidation_price": float(basket.liquidation_price) if basket.liquidation_price is not None else None,
+        "liquidation_price": float(basket.liquidation_price)
+        if basket.liquidation_price is not None
+        else None,
         "realized_pnl": float(basket.realized_pnl) if basket.realized_pnl is not None else None,
         "funding_paid": float(basket.funding_paid) if basket.funding_paid is not None else None,
         "fees_paid": float(basket.fees_paid) if basket.fees_paid is not None else None,
@@ -236,7 +244,8 @@ async def get_equity_history(
     hours: int = Query(24, ge=1, le=720),
 ):
     """Get equity snapshots for charting."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
+
     from app.models.equity_snapshot import EquitySnapshot
 
     acc_result = await db.execute(
@@ -248,12 +257,14 @@ async def get_equity_history(
     if not acc_result.scalars().first():
         raise HTTPException(status_code=404, detail="Account not found")
 
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    since = datetime.now(UTC) - timedelta(hours=hours)
     result = await db.execute(
-        select(EquitySnapshot).where(
+        select(EquitySnapshot)
+        .where(
             EquitySnapshot.account_id == account_id,
             EquitySnapshot.recorded_at >= since,
-        ).order_by(EquitySnapshot.recorded_at.asc())
+        )
+        .order_by(EquitySnapshot.recorded_at.asc())
     )
     snapshots = result.scalars().all()
 
@@ -286,74 +297,106 @@ async def get_pnl_summary(
         raise HTTPException(status_code=404, detail="Account not found")
 
     # Total PnL
-    total_pnl = (await db.execute(
-        select(func.coalesce(func.sum(Basket.realized_pnl), 0)).where(
-            Basket.account_id == account_id, Basket.realized_pnl != None
+    total_pnl = (
+        await db.execute(
+            select(func.coalesce(func.sum(Basket.realized_pnl), 0)).where(
+                Basket.account_id == account_id, Basket.realized_pnl != None
+            )
         )
-    )).scalar()
+    ).scalar()
 
-    total_fees = (await db.execute(
-        select(func.coalesce(func.sum(Basket.fees_paid), 0)).where(
-            Basket.account_id == account_id
+    total_fees = (
+        await db.execute(
+            select(func.coalesce(func.sum(Basket.fees_paid), 0)).where(
+                Basket.account_id == account_id
+            )
         )
-    )).scalar()
+    ).scalar()
 
-    total_funding = (await db.execute(
-        select(func.coalesce(func.sum(Basket.funding_paid), 0)).where(
-            Basket.account_id == account_id
+    total_funding = (
+        await db.execute(
+            select(func.coalesce(func.sum(Basket.funding_paid), 0)).where(
+                Basket.account_id == account_id
+            )
         )
-    )).scalar()
+    ).scalar()
 
     # Exclude ERROR baskets from total — they are failed attempts, not real trades
-    total_baskets = (await db.execute(
-        select(func.count()).select_from(Basket).where(
-            Basket.account_id == account_id,
-            Basket.status != "ERROR",
+    total_baskets = (
+        await db.execute(
+            select(func.count())
+            .select_from(Basket)
+            .where(
+                Basket.account_id == account_id,
+                Basket.status != "ERROR",
+            )
         )
-    )).scalar()
+    ).scalar()
 
-    error_baskets = (await db.execute(
-        select(func.count()).select_from(Basket).where(
-            Basket.account_id == account_id,
-            Basket.status == "ERROR",
+    error_baskets = (
+        await db.execute(
+            select(func.count())
+            .select_from(Basket)
+            .where(
+                Basket.account_id == account_id,
+                Basket.status == "ERROR",
+            )
         )
-    )).scalar()
+    ).scalar()
 
-    closed_baskets = (await db.execute(
-        select(func.count()).select_from(Basket).where(
-            Basket.account_id == account_id, Basket.status == "CLOSED"
+    closed_baskets = (
+        await db.execute(
+            select(func.count())
+            .select_from(Basket)
+            .where(Basket.account_id == account_id, Basket.status == "CLOSED")
         )
-    )).scalar()
+    ).scalar()
 
-    winning_baskets = (await db.execute(
-        select(func.count()).select_from(Basket).where(
-            Basket.account_id == account_id,
-            Basket.status == "CLOSED",
-            Basket.realized_pnl > 0,
+    winning_baskets = (
+        await db.execute(
+            select(func.count())
+            .select_from(Basket)
+            .where(
+                Basket.account_id == account_id,
+                Basket.status == "CLOSED",
+                Basket.realized_pnl > 0,
+            )
         )
-    )).scalar()
+    ).scalar()
 
     # External closure stats
-    manual_close_count = (await db.execute(
-        select(func.count()).select_from(Basket).where(
-            Basket.account_id == account_id,
-            Basket.exit_reason == "MANUAL_CLOSE",
+    manual_close_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(Basket)
+            .where(
+                Basket.account_id == account_id,
+                Basket.exit_reason == "MANUAL_CLOSE",
+            )
         )
-    )).scalar()
+    ).scalar()
 
-    liquidation_count = (await db.execute(
-        select(func.count()).select_from(Basket).where(
-            Basket.account_id == account_id,
-            Basket.exit_reason.in_(["LIQUIDATION", "ADL"]),
+    liquidation_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(Basket)
+            .where(
+                Basket.account_id == account_id,
+                Basket.exit_reason.in_(["LIQUIDATION", "ADL"]),
+            )
         )
-    )).scalar()
+    ).scalar()
 
-    risk_stop_count = (await db.execute(
-        select(func.count()).select_from(Basket).where(
-            Basket.account_id == account_id,
-            Basket.exit_reason == "RISK_STOP",
+    risk_stop_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(Basket)
+            .where(
+                Basket.account_id == account_id,
+                Basket.exit_reason == "RISK_STOP",
+            )
         )
-    )).scalar()
+    ).scalar()
 
     return {
         "total_realized_pnl": float(total_pnl),
@@ -378,9 +421,10 @@ async def export_csv(
     db: AsyncSession = Depends(get_db),
 ):
     """Export baskets and orders as CSV."""
-    from fastapi.responses import StreamingResponse
     import csv
     import io
+
+    from fastapi.responses import StreamingResponse
 
     acc_result = await db.execute(
         scope.filter_user_owned(
@@ -392,7 +436,8 @@ async def export_csv(
         raise HTTPException(status_code=404, detail="Account not found")
 
     result = await db.execute(
-        select(Basket).where(Basket.account_id == account_id)
+        select(Basket)
+        .where(Basket.account_id == account_id)
         .options(selectinload(Basket.orders))
         .order_by(Basket.opened_at.desc())
     )
@@ -400,35 +445,101 @@ async def export_csv(
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow([
-        "basket_id", "symbol", "side", "status", "bo_price", "avg_entry",
-        "qty", "tp_price", "realized_pnl", "fees_paid", "sos_filled",
-        "opened_at", "closed_at", "exit_reason",
-        "order_id", "order_role", "order_side", "order_type",
-        "order_qty", "order_price", "order_status", "order_filled_qty",
-        "order_avg_fill", "order_commission", "order_placed_at", "order_filled_at",
-    ])
+    writer.writerow(
+        [
+            "basket_id",
+            "symbol",
+            "side",
+            "status",
+            "bo_price",
+            "avg_entry",
+            "qty",
+            "tp_price",
+            "realized_pnl",
+            "fees_paid",
+            "sos_filled",
+            "opened_at",
+            "closed_at",
+            "exit_reason",
+            "order_id",
+            "order_role",
+            "order_side",
+            "order_type",
+            "order_qty",
+            "order_price",
+            "order_status",
+            "order_filled_qty",
+            "order_avg_fill",
+            "order_commission",
+            "order_placed_at",
+            "order_filled_at",
+        ]
+    )
 
     for b in baskets:
         if b.orders:
             for o in b.orders:
-                writer.writerow([
-                    str(b.id), b.symbol, b.side, b.status,
-                    b.bo_price, b.avg_entry, b.qty, b.tp_price,
-                    b.realized_pnl, b.fees_paid, b.sos_filled,
-                    b.opened_at, b.closed_at, b.exit_reason,
-                    str(o.id), o.role, o.side, o.type,
-                    o.qty, o.price, o.status, o.filled_qty,
-                    o.avg_fill_price, o.commission, o.placed_at, o.filled_at,
-                ])
+                writer.writerow(
+                    [
+                        str(b.id),
+                        b.symbol,
+                        b.side,
+                        b.status,
+                        b.bo_price,
+                        b.avg_entry,
+                        b.qty,
+                        b.tp_price,
+                        b.realized_pnl,
+                        b.fees_paid,
+                        b.sos_filled,
+                        b.opened_at,
+                        b.closed_at,
+                        b.exit_reason,
+                        str(o.id),
+                        o.role,
+                        o.side,
+                        o.type,
+                        o.qty,
+                        o.price,
+                        o.status,
+                        o.filled_qty,
+                        o.avg_fill_price,
+                        o.commission,
+                        o.placed_at,
+                        o.filled_at,
+                    ]
+                )
         else:
-            writer.writerow([
-                str(b.id), b.symbol, b.side, b.status,
-                b.bo_price, b.avg_entry, b.qty, b.tp_price,
-                b.realized_pnl, b.fees_paid, b.sos_filled,
-                b.opened_at, b.closed_at, b.exit_reason,
-                "", "", "", "", "", "", "", "", "", "", "", "",
-            ])
+            writer.writerow(
+                [
+                    str(b.id),
+                    b.symbol,
+                    b.side,
+                    b.status,
+                    b.bo_price,
+                    b.avg_entry,
+                    b.qty,
+                    b.tp_price,
+                    b.realized_pnl,
+                    b.fees_paid,
+                    b.sos_filled,
+                    b.opened_at,
+                    b.closed_at,
+                    b.exit_reason,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                ]
+            )
 
     output.seek(0)
     return StreamingResponse(

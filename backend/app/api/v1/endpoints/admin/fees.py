@@ -1,30 +1,32 @@
 """Admin fee management endpoints — settings, deposits, balance adjustments."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 
 from app.api.deps import get_db, require_admin
-from app.core.rate_limit import get_client_ip
 from app.core.enums import AuditAction, DepositStatus, FeeTransactionType
-from app.models.user import User
-from app.models.fee_transaction import FeeTransaction
+from app.core.rate_limit import get_client_ip
 from app.models.deposit_request import DepositRequest
+from app.models.fee_transaction import FeeTransaction
 from app.models.platform_settings import PlatformSettings
-from app.services.fee_service import (
-    credit_deposit, admin_adjust_balance, get_fee_setting
+from app.models.user import User
+from app.schemas.fee import (
+    BalanceAdjustRequest,
+    FeeSettingsUpdateRequest,
+    UserFeeOverrideRequest,
 )
 from app.services.audit_service import record_audit
-from app.schemas.fee import (
-    FeeSettingsUpdateRequest, BalanceAdjustRequest, UserFeeOverrideRequest,
-)
+from app.services.fee_service import admin_adjust_balance, credit_deposit, get_fee_setting
 
 router = APIRouter()
 
 
 # ── Fee Settings ──
+
 
 @router.get("/settings")
 async def get_fee_settings(
@@ -66,24 +68,25 @@ async def update_fee_settings(
     changes = {}
     for field_name, (key, value) in mapping.items():
         if value is not None:
-            result = await db.execute(
-                select(PlatformSettings).where(PlatformSettings.key == key)
-            )
+            result = await db.execute(select(PlatformSettings).where(PlatformSettings.key == key))
             setting = result.scalar_one_or_none()
             if setting:
                 old_val = setting.value
                 if isinstance(value, bool):
                     setting.value = str(value).lower()
                 elif isinstance(value, str):
-                    setting.value = f'"{value}"' if key == "twin_grid_deposit_address" else str(value)
+                    setting.value = (
+                        f'"{value}"' if key == "twin_grid_deposit_address" else str(value)
+                    )
                 else:
                     setting.value = str(value)
-                setting.updated_at = datetime.now(timezone.utc)
+                setting.updated_at = datetime.now(UTC)
                 setting.updated_by = admin.id
                 changes[field_name] = {"old": old_val, "new": setting.value}
 
     await record_audit(
-        db, action=AuditAction.FEE_SETTINGS_CHANGED,
+        db,
+        action=AuditAction.FEE_SETTINGS_CHANGED,
         actor_user_id=admin.id,
         payload=changes,
         ip_address=get_client_ip(request),
@@ -95,6 +98,7 @@ async def update_fee_settings(
 
 
 # ── Deposit Management ──
+
 
 @router.get("/deposits")
 async def list_deposits(
@@ -109,9 +113,7 @@ async def list_deposits(
     if status:
         stmt = stmt.where(DepositRequest.status == status)
 
-    count_result = await db.execute(
-        select(func.count()).select_from(stmt.subquery())
-    )
+    count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
     total = count_result.scalar()
 
     stmt = stmt.order_by(DepositRequest.created_at.desc())
@@ -154,9 +156,7 @@ async def approve_deposit(
     db: AsyncSession = Depends(get_db),
 ):
     """Approve a pending deposit — credits user balance."""
-    result = await db.execute(
-        select(DepositRequest).where(DepositRequest.id == deposit_id)
-    )
+    result = await db.execute(select(DepositRequest).where(DepositRequest.id == deposit_id))
     deposit = result.scalar_one_or_none()
     if not deposit:
         raise HTTPException(status_code=404, detail="Deposit not found")
@@ -165,17 +165,16 @@ async def approve_deposit(
         raise HTTPException(status_code=400, detail=f"Deposit is already {deposit.status}")
 
     # Credit the user's balance
-    fee_tx = await credit_deposit(
-        db, deposit.user_id, float(deposit.amount), admin.id
-    )
+    fee_tx = await credit_deposit(db, deposit.user_id, float(deposit.amount), admin.id)
 
     deposit.status = DepositStatus.COMPLETED
     deposit.reviewed_by = admin.id
-    deposit.reviewed_at = datetime.now(timezone.utc)
+    deposit.reviewed_at = datetime.now(UTC)
     deposit.fee_transaction_id = fee_tx.id
 
     await record_audit(
-        db, action=AuditAction.DEPOSIT_APPROVED,
+        db,
+        action=AuditAction.DEPOSIT_APPROVED,
         actor_user_id=admin.id,
         target_user_id=deposit.user_id,
         payload={"deposit_id": str(deposit_id), "amount": float(deposit.amount)},
@@ -199,9 +198,7 @@ async def reject_deposit(
     reason: str = Query(None),
 ):
     """Reject a pending deposit."""
-    result = await db.execute(
-        select(DepositRequest).where(DepositRequest.id == deposit_id)
-    )
+    result = await db.execute(select(DepositRequest).where(DepositRequest.id == deposit_id))
     deposit = result.scalar_one_or_none()
     if not deposit:
         raise HTTPException(status_code=404, detail="Deposit not found")
@@ -211,11 +208,12 @@ async def reject_deposit(
 
     deposit.status = DepositStatus.REJECTED
     deposit.reviewed_by = admin.id
-    deposit.reviewed_at = datetime.now(timezone.utc)
+    deposit.reviewed_at = datetime.now(UTC)
     deposit.reject_reason = reason or "Rejected by admin"
 
     await record_audit(
-        db, action=AuditAction.DEPOSIT_REJECTED,
+        db,
+        action=AuditAction.DEPOSIT_REJECTED,
         actor_user_id=admin.id,
         target_user_id=deposit.user_id,
         payload={
@@ -233,6 +231,7 @@ async def reject_deposit(
 
 # ── User Balance Management ──
 
+
 @router.get("/users/{user_id}/balance")
 async def get_user_balance(
     user_id: UUID,
@@ -246,26 +245,32 @@ async def get_user_balance(
         raise HTTPException(status_code=404, detail="User not found")
 
     # Total fees collected from this user
-    total_fees = (await db.execute(
-        select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
-            FeeTransaction.user_id == user_id,
-            FeeTransaction.type == FeeTransactionType.FEE_DEDUCTION,
+    total_fees = (
+        await db.execute(
+            select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
+                FeeTransaction.user_id == user_id,
+                FeeTransaction.type == FeeTransactionType.FEE_DEDUCTION,
+            )
         )
-    )).scalar()
+    ).scalar()
 
     # Total deposited
-    total_deposited = (await db.execute(
-        select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
-            FeeTransaction.user_id == user_id,
-            FeeTransaction.type == FeeTransactionType.DEPOSIT,
+    total_deposited = (
+        await db.execute(
+            select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
+                FeeTransaction.user_id == user_id,
+                FeeTransaction.type == FeeTransactionType.DEPOSIT,
+            )
         )
-    )).scalar()
+    ).scalar()
 
     return {
         "user_id": str(user.id),
         "email": user.email,
         "balance": float(user.twin_grid_balance),
-        "fee_percentage_override": float(user.fee_percentage_override) if user.fee_percentage_override else None,
+        "fee_percentage_override": float(user.fee_percentage_override)
+        if user.fee_percentage_override
+        else None,
         "total_deposited": float(total_deposited),
         "total_fees_paid": abs(float(total_fees)),
     }
@@ -285,12 +290,11 @@ async def adjust_user_balance(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    fee_tx = await admin_adjust_balance(
-        db, user_id, body.amount, body.note, admin.id
-    )
+    fee_tx = await admin_adjust_balance(db, user_id, body.amount, body.note, admin.id)
 
     await record_audit(
-        db, action=AuditAction.BALANCE_ADJUSTED,
+        db,
+        action=AuditAction.BALANCE_ADJUSTED,
         actor_user_id=admin.id,
         target_user_id=user_id,
         payload={
@@ -328,7 +332,8 @@ async def set_user_fee_override(
     user.fee_percentage_override = body.fee_percentage_override
 
     await record_audit(
-        db, action=AuditAction.FEE_SETTINGS_CHANGED,
+        db,
+        action=AuditAction.FEE_SETTINGS_CHANGED,
         actor_user_id=admin.id,
         target_user_id=user_id,
         payload={
@@ -348,6 +353,7 @@ async def set_user_fee_override(
 
 # ── Fee Dashboard ──
 
+
 @router.get("/dashboard")
 async def get_fee_dashboard(
     admin: User = Depends(require_admin),
@@ -355,42 +361,53 @@ async def get_fee_dashboard(
 ):
     """Fee revenue overview for admin dashboard."""
     # Total fees collected (sum of all FEE_DEDUCTION — they're negative amounts)
-    total_fees = (await db.execute(
-        select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
-            FeeTransaction.type == FeeTransactionType.FEE_DEDUCTION,
+    total_fees = (
+        await db.execute(
+            select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
+                FeeTransaction.type == FeeTransactionType.FEE_DEDUCTION,
+            )
         )
-    )).scalar()
+    ).scalar()
 
     # Total deposits
-    total_deposits = (await db.execute(
-        select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
-            FeeTransaction.type == FeeTransactionType.DEPOSIT,
+    total_deposits = (
+        await db.execute(
+            select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
+                FeeTransaction.type == FeeTransactionType.DEPOSIT,
+            )
         )
-    )).scalar()
+    ).scalar()
 
     # Pending deposits count + amount
-    pending_stats = (await db.execute(
-        select(
-            func.count(),
-            func.coalesce(func.sum(DepositRequest.amount), 0)
-        ).where(DepositRequest.status == DepositStatus.PENDING)
-    )).one()
+    pending_stats = (
+        await db.execute(
+            select(func.count(), func.coalesce(func.sum(DepositRequest.amount), 0)).where(
+                DepositRequest.status == DepositStatus.PENDING
+            )
+        )
+    ).one()
 
     # Users with positive balance
-    active_users = (await db.execute(
-        select(func.count()).select_from(User).where(
-            User.twin_grid_balance > 0,
-            User.deleted_at == None,
+    active_users = (
+        await db.execute(
+            select(func.count())
+            .select_from(User)
+            .where(
+                User.twin_grid_balance > 0,
+                User.deleted_at == None,
+            )
         )
-    )).scalar()
+    ).scalar()
 
     # Total negative balance (debt owed)
-    negative_sum = (await db.execute(
-        select(func.coalesce(func.sum(User.twin_grid_balance), 0)).where(
-            User.twin_grid_balance < 0,
-            User.deleted_at == None,
+    negative_sum = (
+        await db.execute(
+            select(func.coalesce(func.sum(User.twin_grid_balance), 0)).where(
+                User.twin_grid_balance < 0,
+                User.deleted_at == None,
+            )
         )
-    )).scalar()
+    ).scalar()
 
     return {
         "total_fees_collected": abs(float(total_fees)),
@@ -418,9 +435,7 @@ async def list_all_transactions(
     if user_id:
         stmt = stmt.where(FeeTransaction.user_id == user_id)
 
-    count_result = await db.execute(
-        select(func.count()).select_from(stmt.subquery())
-    )
+    count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
     total = count_result.scalar()
 
     stmt = stmt.order_by(FeeTransaction.created_at.desc())

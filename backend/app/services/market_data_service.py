@@ -6,33 +6,35 @@ Supports: BTCUSDT, ETHUSDT, SOLUSDT
 Data types: klines (1m, 5m, 15m, 1h, 4h, 1d), funding_rate (8h)
 """
 
-import httpx
+import asyncio
 import json
 import sys
-import asyncio
-import pandas as pd
-from datetime import datetime, timezone, timedelta
-from dateutil.relativedelta import relativedelta
-from typing import List, Optional, Dict, Any
-import structlog
+from datetime import UTC, datetime
+from typing import Any
 
+import httpx
+import pandas as pd
+import structlog
+from dateutil.relativedelta import relativedelta
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models.market_data_cache import MarketDataCache
 
 logger = structlog.get_logger(__name__)
 
+
 # ── Binance API endpoints (fallback chain for geo-blocked regions) ──
 # Import settings lazily to avoid circular imports
 def _get_binance_urls():
     from app.core.config import settings
+
     return [
         settings.BINANCE_LIVE_BASE_URL,
         settings.BINANCE_DEMO_BASE_URL,
         settings.BINANCE_TESTNET_BASE_URL,
     ]
+
 
 VALID_SYMBOLS = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"}
 VALID_KLINE_INTERVALS = {"1m", "5m", "15m", "1h", "4h", "1d"}
@@ -90,7 +92,7 @@ async def _fetch_with_retry(
             return resp.json()
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as e:
             if attempt == max_retries - 1:
-                raise ValueError(f"Failed after {max_retries} attempts: {e}")
+                raise ValueError(f"Failed after {max_retries} attempts: {e}") from e
             logger.warning(f"Retry {attempt + 1}/{max_retries} after {delay}s: {e}")
             await asyncio.sleep(delay)
             delay *= 2
@@ -103,10 +105,10 @@ async def download_klines_month(
     year: int,
     month: int,
     db: AsyncSession,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Download one month of kline data and upsert into the cache.
-    
+
     Returns metadata dict with candle_count and status.
     """
     if symbol not in VALID_SYMBOLS:
@@ -115,10 +117,10 @@ async def download_klines_month(
         raise ValueError(f"Invalid interval: {interval}")
 
     # Calculate month boundaries (UTC)
-    month_start = datetime(year, month, 1, tzinfo=timezone.utc)
+    month_start = datetime(year, month, 1, tzinfo=UTC)
     next_month = month_start + relativedelta(months=1)
     # Don't go past current time
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     month_end = min(next_month, now)
 
     if month_start >= now:
@@ -143,9 +145,7 @@ async def download_klines_month(
                 "endTime": end_ms,
                 "limit": 1500,
             }
-            data = await _fetch_with_retry(
-                client, f"{base_url}/fapi/v1/klines", params
-            )
+            data = await _fetch_with_retry(client, f"{base_url}/fapi/v1/klines", params)
             if not data:
                 break
 
@@ -169,27 +169,35 @@ async def download_klines_month(
         if ot in seen:
             continue
         seen.add(ot)
-        compact.append([
-            ot,
-            float(c[1]),  # open
-            float(c[2]),  # high
-            float(c[3]),  # low
-            float(c[4]),  # close
-            float(c[5]),  # volume
-        ])
+        compact.append(
+            [
+                ot,
+                float(c[1]),  # open
+                float(c[2]),  # high
+                float(c[3]),  # low
+                float(c[4]),  # close
+                float(c[5]),  # volume
+            ]
+        )
 
     compact.sort(key=lambda x: x[0])
     data_size = sys.getsizeof(json.dumps(compact))
 
     # Upsert into cache (replace if exists)
-    existing = (await db.execute(
-        select(MarketDataCache).where(
-            MarketDataCache.symbol == symbol,
-            MarketDataCache.data_type == "klines",
-            MarketDataCache.interval == interval,
-            MarketDataCache.year_month == year_month,
+    existing = (
+        (
+            await db.execute(
+                select(MarketDataCache).where(
+                    MarketDataCache.symbol == symbol,
+                    MarketDataCache.data_type == "klines",
+                    MarketDataCache.interval == interval,
+                    MarketDataCache.year_month == year_month,
+                )
+            )
         )
-    )).scalars().first()
+        .scalars()
+        .first()
+    )
 
     if existing:
         existing.data = compact
@@ -197,19 +205,21 @@ async def download_klines_month(
         existing.file_size_bytes = data_size
         existing.date_start = month_start
         existing.date_end = month_end
-        existing.downloaded_at = datetime.now(timezone.utc)
+        existing.downloaded_at = datetime.now(UTC)
     else:
-        db.add(MarketDataCache(
-            symbol=symbol,
-            data_type="klines",
-            interval=interval,
-            year_month=year_month,
-            date_start=month_start,
-            date_end=month_end,
-            data=compact,
-            candle_count=len(compact),
-            file_size_bytes=data_size,
-        ))
+        db.add(
+            MarketDataCache(
+                symbol=symbol,
+                data_type="klines",
+                interval=interval,
+                year_month=year_month,
+                date_start=month_start,
+                date_end=month_end,
+                data=compact,
+                candle_count=len(compact),
+                file_size_bytes=data_size,
+            )
+        )
 
     await db.commit()
 
@@ -227,18 +237,18 @@ async def download_funding_rates_month(
     year: int,
     month: int,
     db: AsyncSession,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Download one month of funding rate history and upsert into the cache.
-    
+
     Binance funding rates are every 8 hours (3 per day, ~90 per month).
     """
     if symbol not in VALID_SYMBOLS:
         raise ValueError(f"Invalid symbol: {symbol}")
 
-    month_start = datetime(year, month, 1, tzinfo=timezone.utc)
+    month_start = datetime(year, month, 1, tzinfo=UTC)
     next_month = month_start + relativedelta(months=1)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     month_end = min(next_month, now)
 
     if month_start >= now:
@@ -262,9 +272,7 @@ async def download_funding_rates_month(
                 "endTime": end_ms,
                 "limit": 1000,
             }
-            data = await _fetch_with_retry(
-                client, f"{base_url}/fapi/v1/fundingRate", params
-            )
+            data = await _fetch_with_retry(client, f"{base_url}/fapi/v1/fundingRate", params)
             if not data:
                 break
 
@@ -287,23 +295,31 @@ async def download_funding_rates_month(
         if ft in seen:
             continue
         seen.add(ft)
-        compact.append([
-            ft,
-            float(r["fundingRate"]),
-            float(r.get("markPrice", 0)),
-        ])
+        compact.append(
+            [
+                ft,
+                float(r["fundingRate"]),
+                float(r.get("markPrice", 0)),
+            ]
+        )
 
     compact.sort(key=lambda x: x[0])
     data_size = sys.getsizeof(json.dumps(compact))
 
-    existing = (await db.execute(
-        select(MarketDataCache).where(
-            MarketDataCache.symbol == symbol,
-            MarketDataCache.data_type == "funding_rate",
-            MarketDataCache.interval == FUNDING_INTERVAL,
-            MarketDataCache.year_month == year_month,
+    existing = (
+        (
+            await db.execute(
+                select(MarketDataCache).where(
+                    MarketDataCache.symbol == symbol,
+                    MarketDataCache.data_type == "funding_rate",
+                    MarketDataCache.interval == FUNDING_INTERVAL,
+                    MarketDataCache.year_month == year_month,
+                )
+            )
         )
-    )).scalars().first()
+        .scalars()
+        .first()
+    )
 
     if existing:
         existing.data = compact
@@ -311,19 +327,21 @@ async def download_funding_rates_month(
         existing.file_size_bytes = data_size
         existing.date_start = month_start
         existing.date_end = month_end
-        existing.downloaded_at = datetime.now(timezone.utc)
+        existing.downloaded_at = datetime.now(UTC)
     else:
-        db.add(MarketDataCache(
-            symbol=symbol,
-            data_type="funding_rate",
-            interval=FUNDING_INTERVAL,
-            year_month=year_month,
-            date_start=month_start,
-            date_end=month_end,
-            data=compact,
-            candle_count=len(compact),
-            file_size_bytes=data_size,
-        ))
+        db.add(
+            MarketDataCache(
+                symbol=symbol,
+                data_type="funding_rate",
+                interval=FUNDING_INTERVAL,
+                year_month=year_month,
+                date_start=month_start,
+                date_end=month_end,
+                data=compact,
+                candle_count=len(compact),
+                file_size_bytes=data_size,
+            )
+        )
 
     await db.commit()
 
@@ -344,13 +362,13 @@ async def download_full_range(
     end_month: int,
     db: AsyncSession,
     include_funding: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Download klines (and optionally funding rates) for a full date range.
-    
+
     SMART SKIP: Only downloads months that are NOT already in the cache.
     The current (incomplete) month is always re-downloaded to pick up new data.
-    
+
     Returns aggregate stats of the download.
     """
     results = {
@@ -365,13 +383,13 @@ async def download_full_range(
         "errors": [],
     }
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     current_ym = f"{now.year:04d}-{now.month:02d}"
 
     # ── Build the full list of year-months in the requested range ──
     all_months = _get_month_range(
-        datetime(start_year, start_month, 1, tzinfo=timezone.utc),
-        datetime(end_year, end_month, 1, tzinfo=timezone.utc),
+        datetime(start_year, start_month, 1, tzinfo=UTC),
+        datetime(end_year, end_month, 1, tzinfo=UTC),
     )
 
     # ── Query which kline months are already cached ──
@@ -398,7 +416,7 @@ async def download_full_range(
 
     for ym in all_months:
         y, m = int(ym[:4]), int(ym[5:])
-        is_current_month = (ym == current_ym)
+        is_current_month = ym == current_ym
 
         # ── Klines: skip if cached and NOT the current (partial) month ──
         if ym in cached_kline_months and not is_current_month:
@@ -434,16 +452,17 @@ async def download_full_range(
 
 # ── Query functions used by the backtest engine ──
 
+
 async def get_cached_klines(
     db: AsyncSession,
     symbol: str,
     interval: str,
     start_time: datetime,
     end_time: datetime,
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame | None:
     """
     Load klines from cache for the given date range.
-    
+
     Returns a DataFrame in the same format as the live API fetch,
     or None if cache is incomplete for the requested range.
     """
@@ -452,12 +471,14 @@ async def get_cached_klines(
 
     # Query all matching chunks
     result = await db.execute(
-        select(MarketDataCache).where(
+        select(MarketDataCache)
+        .where(
             MarketDataCache.symbol == symbol,
             MarketDataCache.data_type == "klines",
             MarketDataCache.interval == interval,
             MarketDataCache.year_month.in_(needed_months),
-        ).order_by(MarketDataCache.year_month)
+        )
+        .order_by(MarketDataCache.year_month)
     )
     chunks = result.scalars().all()
 
@@ -477,9 +498,17 @@ async def get_cached_klines(
         return None
 
     # Build DataFrame matching the format from fetch_historical_klines
-    df = pd.DataFrame(all_candles, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-    ])
+    df = pd.DataFrame(
+        all_candles,
+        columns=[
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ],
+    )
     df["open_time"] = df["open_time"].astype(int)
 
     # Filter to exact requested range
@@ -505,22 +534,24 @@ async def get_cached_funding_rates(
     symbol: str,
     start_time: datetime,
     end_time: datetime,
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame | None:
     """
     Load funding rate history from cache for the given date range.
-    
+
     Returns DataFrame with columns: [funding_time, funding_rate, mark_price]
     or None if cache is incomplete.
     """
     needed_months = _get_month_range(start_time, end_time)
 
     result = await db.execute(
-        select(MarketDataCache).where(
+        select(MarketDataCache)
+        .where(
             MarketDataCache.symbol == symbol,
             MarketDataCache.data_type == "funding_rate",
             MarketDataCache.interval == FUNDING_INTERVAL,
             MarketDataCache.year_month.in_(needed_months),
-        ).order_by(MarketDataCache.year_month)
+        )
+        .order_by(MarketDataCache.year_month)
     )
     chunks = result.scalars().all()
 
@@ -544,13 +575,17 @@ async def get_cached_funding_rates(
     end_ms = int(end_time.timestamp() * 1000)
     df = df[(df["funding_time"] >= start_ms) & (df["funding_time"] <= end_ms)]
 
-    df = df.drop_duplicates(subset=["funding_time"]).sort_values("funding_time").reset_index(drop=True)
+    df = (
+        df.drop_duplicates(subset=["funding_time"])
+        .sort_values("funding_time")
+        .reset_index(drop=True)
+    )
 
     logger.info(f"Funding cache hit: {len(df)} rates for {symbol}")
     return df
 
 
-async def get_cache_status(db: AsyncSession) -> Dict[str, Any]:
+async def get_cache_status(db: AsyncSession) -> dict[str, Any]:
     """
     Get a summary of all cached data — used by the admin UI.
     Also detects gaps (missing months) in each dataset for data integrity.
@@ -568,11 +603,13 @@ async def get_cache_status(db: AsyncSession) -> Dict[str, Any]:
             func.sum(MarketDataCache.file_size_bytes).label("total_bytes"),
             func.min(MarketDataCache.date_start).label("earliest"),
             func.max(MarketDataCache.date_end).label("latest"),
-        ).group_by(
+        )
+        .group_by(
             MarketDataCache.symbol,
             MarketDataCache.data_type,
             MarketDataCache.interval,
-        ).order_by(
+        )
+        .order_by(
             MarketDataCache.symbol,
             MarketDataCache.data_type,
             MarketDataCache.interval,
@@ -597,7 +634,7 @@ async def get_cache_status(db: AsyncSession) -> Dict[str, Any]:
     ym_rows = ym_result.all()
 
     # Build lookup: (symbol, data_type, interval) -> set of year_months
-    cached_ym_map: Dict[tuple, set] = {}
+    cached_ym_map: dict[tuple, set] = {}
     for ymr in ym_rows:
         key = (ymr.symbol, ymr.data_type, ymr.interval)
         cached_ym_map.setdefault(key, set()).add(ymr.year_month)
@@ -608,32 +645,34 @@ async def get_cache_status(db: AsyncSession) -> Dict[str, Any]:
         cached_months_set = cached_ym_map.get(key, set())
 
         # Detect gaps: compute expected months between earliest and latest
-        missing_months: List[str] = []
+        missing_months: list[str] = []
         if row.earliest and row.latest:
             expected = _get_month_range(row.earliest, row.latest)
             missing_months = sorted(set(expected) - cached_months_set)
 
-        items.append({
-            "symbol": row.symbol,
-            "data_type": row.data_type,
-            "interval": row.interval,
-            "months_cached": row.months,
-            "total_records": int(row.total_records or 0),
-            "total_bytes": int(row.total_bytes or 0),
-            "earliest": row.earliest.isoformat() if row.earliest else None,
-            "latest": row.latest.isoformat() if row.latest else None,
-            "missing_months": missing_months,
-            "has_gaps": len(missing_months) > 0,
-        })
+        items.append(
+            {
+                "symbol": row.symbol,
+                "data_type": row.data_type,
+                "interval": row.interval,
+                "months_cached": row.months,
+                "total_records": int(row.total_records or 0),
+                "total_bytes": int(row.total_bytes or 0),
+                "earliest": row.earliest.isoformat() if row.earliest else None,
+                "latest": row.latest.isoformat() if row.latest else None,
+                "missing_months": missing_months,
+                "has_gaps": len(missing_months) > 0,
+            }
+        )
 
     return {"items": items}
 
 
 async def delete_cache(
     db: AsyncSession,
-    symbol: Optional[str] = None,
-    data_type: Optional[str] = None,
-    interval: Optional[str] = None,
+    symbol: str | None = None,
+    data_type: str | None = None,
+    interval: str | None = None,
 ) -> int:
     """Delete cached data, optionally filtered. Returns count of deleted rows."""
     stmt = delete(MarketDataCache)
@@ -649,7 +688,7 @@ async def delete_cache(
     return result.rowcount
 
 
-def _get_month_range(start: datetime, end: datetime) -> List[str]:
+def _get_month_range(start: datetime, end: datetime) -> list[str]:
     """Get list of year-month strings covering the date range."""
     months = []
     current = start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -661,11 +700,11 @@ def _get_month_range(start: datetime, end: datetime) -> List[str]:
 
 async def fix_gaps(
     db: AsyncSession,
-    symbol: Optional[str] = None,
-) -> Dict[str, Any]:
+    symbol: str | None = None,
+) -> dict[str, Any]:
     """
     Find all gaps (missing months) across cached datasets and re-download them.
-    
+
     If symbol is provided, only fix gaps for that symbol.
     Returns a summary of what was fixed.
     """
@@ -707,7 +746,7 @@ async def fix_gaps(
         ym_query = ym_query.where(MarketDataCache.symbol == symbol)
     ym_rows = (await db.execute(ym_query)).all()
 
-    cached_ym_map: Dict[tuple, set] = {}
+    cached_ym_map: dict[tuple, set] = {}
     for ymr in ym_rows:
         key = (ymr.symbol, ymr.data_type, ymr.interval)
         cached_ym_map.setdefault(key, set()).add(ymr.year_month)
@@ -740,12 +779,14 @@ async def fix_gaps(
 
                 count = r.get("candle_count", 0)
                 results["gaps_fixed"] += 1
-                results["details"].append({
-                    "dataset": label,
-                    "month": ym,
-                    "records": count,
-                    "status": "fixed",
-                })
+                results["details"].append(
+                    {
+                        "dataset": label,
+                        "month": ym,
+                        "records": count,
+                        "status": "fixed",
+                    }
+                )
                 logger.info(f"Fixed gap: {label} {ym} ({count} records)")
 
                 # Small delay between months to avoid rate limiting
@@ -755,12 +796,14 @@ async def fix_gaps(
                 results["gaps_failed"] += 1
                 err_msg = f"{label} {ym}: {str(e)}"
                 results["errors"].append(err_msg)
-                results["details"].append({
-                    "dataset": label,
-                    "month": ym,
-                    "status": "failed",
-                    "error": str(e),
-                })
+                results["details"].append(
+                    {
+                        "dataset": label,
+                        "month": ym,
+                        "status": "failed",
+                        "error": str(e),
+                    }
+                )
                 logger.error(f"Gap fix failed: {err_msg}")
 
     return results

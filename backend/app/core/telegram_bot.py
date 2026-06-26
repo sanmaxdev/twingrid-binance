@@ -1,9 +1,10 @@
 """Telegram bot utilities — webhook setup, message sending, verification."""
 
 import hmac
-import hashlib
-import structlog
+
 import httpx
+import structlog
+
 from app.core.config import settings
 
 logger = structlog.get_logger()
@@ -16,7 +17,9 @@ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 async def setup_webhook(backend_url: str):
     """Register the webhook URL with Telegram on app startup."""
     if not BOT_TOKEN:
-        logger.warning("telegram_no_token", msg="TELEGRAM_BOT_TOKEN not set — skipping webhook setup")
+        logger.warning(
+            "telegram_no_token", msg="TELEGRAM_BOT_TOKEN not set — skipping webhook setup"
+        )
         return
 
     webhook_url = f"{backend_url}/api/v1/webhook/telegram"

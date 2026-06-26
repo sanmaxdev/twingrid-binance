@@ -1,14 +1,15 @@
 import asyncio
+
 import structlog
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy.pool import NullPool
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.celery_app import celery_app
 from app.core.config import settings
+from app.core.enums import AccountStatus
 from app.models.account import Account
 from app.models.platform_settings import PlatformSettings
-from app.core.enums import AccountStatus
 from app.services.grid_bot import GridBotService
 
 logger = structlog.get_logger(__name__)
@@ -53,7 +54,7 @@ async def _schedule_grid_ticks():
             select(Account.id).where(
                 Account.status == AccountStatus.RUNNING,
                 Account.auto_trade_enabled == True,
-                Account.deleted_at.is_(None)
+                Account.deleted_at.is_(None),
             )
         )
         account_ids = result.scalars().all()
@@ -91,6 +92,7 @@ def process_account_tick(account_id: str):
 
 # ── Fast Basket Monitoring (30s) ──
 
+
 async def _schedule_basket_monitoring():
     """Only dispatch monitoring ticks for accounts with active baskets."""
     SessionLocal, engine = _get_worker_session_factory()
@@ -105,6 +107,7 @@ async def _schedule_basket_monitoring():
 
         # Only get accounts that have OPEN baskets
         from app.models.basket import Basket
+
         result = await session.execute(
             select(Account.id).where(
                 Account.status == AccountStatus.RUNNING,
@@ -114,7 +117,7 @@ async def _schedule_basket_monitoring():
                     select(Basket.account_id).where(
                         Basket.status.in_(["OPENING", "OPEN", "CLOSING"])
                     )
-                )
+                ),
             )
         )
         account_ids = result.scalars().all()

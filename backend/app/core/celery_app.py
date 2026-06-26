@@ -1,6 +1,7 @@
+import os
+
 from celery import Celery
 from celery.schedules import crontab
-import os
 
 redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
@@ -12,7 +13,7 @@ celery_app = Celery(
         "app.tasks.trading_tasks",
         "app.tasks.equity_task",
         "app.tasks.market_data_task",
-    ]
+    ],
 )
 
 celery_app.conf.update(
@@ -38,5 +39,5 @@ celery_app.conf.update(
             "task": "market_data_auto_update",
             "schedule": crontab(hour=0, minute=30),  # Daily at 00:30 UTC
         },
-    }
+    },
 )

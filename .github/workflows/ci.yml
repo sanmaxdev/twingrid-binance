@@ -38,8 +38,6 @@ jobs:
   backend-lint:
     name: Backend · Lint (ruff)
     runs-on: ubuntu-latest
-    # Non-blocking while the codebase adopts linting — see CONTRIBUTING.md
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -52,15 +50,17 @@ jobs:
       - name: Install ruff
         run: pip install ruff
 
-      - name: Run ruff
+      - name: Lint
         working-directory: backend
         run: ruff check --output-format=github app
+
+      - name: Format check
+        working-directory: backend
+        run: ruff format --check app
 
   frontend:
     name: Frontend · Lint & Build
     runs-on: ubuntu-latest
-    # Non-blocking initially — see CONTRIBUTING.md
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

@@ -38,12 +38,16 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "TWIN GRID Console"
     SMTP_USE_TLS: bool = False
 
-    # Frontend URL for emails
+    # Public base URL of the deployment (used in emails, referral links, CSP)
     APP_PUBLIC_URL: str = "http://localhost"
+
+    # Extra CORS origins, comma-separated (FRONTEND_URL and APP_PUBLIC_URL are
+    # always allowed). Example: "https://app.example.com,https://example.com"
+    CORS_ORIGINS: str = ""
 
     # Resend API (production email)
     RESEND_API_KEY: str | None = None
-    EMAIL_FROM: str = "Twin Grid <noreply@twingridbot.com>"
+    EMAIL_FROM: str = "Twin Grid <noreply@example.com>"
 
     # Telegram Notifications
     TELEGRAM_BOT_TOKEN: str | None = None

@@ -4,12 +4,11 @@ import "./globals.css";
 import { cn } from "@/lib/utils";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/lib/AuthContext";
+import { SITE_URL, SITE_NAME, SUPPORT_EMAIL } from "@/lib/site";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 
-const SITE_URL = "https://twingridbot.com";
-const SITE_NAME = "Twin Grid";
-const OG_IMAGE = "https://twingridbot.com/ogimage.png";
+const OG_IMAGE = `${SITE_URL}/ogimage.png`;
 const SITE_TITLE = "Twin Grid — Automated Binance Futures AI Trading Bot";
 const SITE_DESCRIPTION =
   "Automate your Binance Futures trading with Twin Grid — an enterprise-grade AI-powered algorithmic grid trading bot. Hands-free, 24/7 execution with real-time monitoring and smart risk management.";
@@ -84,7 +83,6 @@ export const metadata: Metadata = {
     title: SITE_TITLE,
     description: SITE_DESCRIPTION,
     images: [OG_IMAGE],
-    creator: "@twingridbot",
   },
 
   // ─── Robots ─────────────────────────────────────────
@@ -188,7 +186,7 @@ export default function RootLayout({
               logo: `${SITE_URL}/logo.png`,
               contactPoint: {
                 "@type": "ContactPoint",
-                email: "help@twingridbot.com",
+                email: SUPPORT_EMAIL,
                 contactType: "customer service",
               },
               sameAs: [],

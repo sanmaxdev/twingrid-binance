@@ -9,29 +9,30 @@ Usage:
     result = await engine.run()
 """
 
+from datetime import UTC, datetime
+from typing import Any
+
 import httpx
-import pandas as pd
 import numpy as np
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List, Optional
+import pandas as pd
 import structlog
 
-from app.strategy.indicators import evaluate_signals
-from app.strategy.grid import calculate_grid_levels, calculate_tp_price
-from app.strategy.trend_filter import detect_trend, evaluate_trend_filter
-from app.services.risk_manager import (
-    get_maintenance_margin, compute_margin_ratio, evaluate_basket_risk,
-    calculate_liquidation_price,
-)
 from app.core.config import settings
+from app.services.risk_manager import (
+    compute_margin_ratio,
+    evaluate_basket_risk,
+)
+from app.strategy.grid import calculate_grid_levels, calculate_tp_price
+from app.strategy.indicators import evaluate_signals
+from app.strategy.trend_filter import detect_trend, evaluate_trend_filter
 
 logger = structlog.get_logger(__name__)
 
 # Binance klines endpoints — try multiple in order (handles US geo-block)
 BINANCE_KLINE_URLS = [
-    settings.BINANCE_LIVE_BASE_URL,       # https://fapi.binance.com
-    settings.BINANCE_DEMO_BASE_URL,       # https://demo-fapi.binance.com
-    settings.BINANCE_TESTNET_BASE_URL,    # https://testnet.binancefuture.com
+    settings.BINANCE_LIVE_BASE_URL,  # https://fapi.binance.com
+    settings.BINANCE_DEMO_BASE_URL,  # https://demo-fapi.binance.com
+    settings.BINANCE_TESTNET_BASE_URL,  # https://testnet.binancefuture.com
 ]
 
 
@@ -72,9 +73,7 @@ async def fetch_historical_klines(
                 "endTime": end_time,
                 "limit": limit,
             }
-            response = await client.get(
-                f"{working_url}/fapi/v1/klines", params=params
-            )
+            response = await client.get(f"{working_url}/fapi/v1/klines", params=params)
             if response.status_code != 200:
                 raise ValueError(f"Binance klines error: {response.text}")
 
@@ -92,11 +91,23 @@ async def fetch_historical_klines(
     if not all_candles:
         return pd.DataFrame()
 
-    df = pd.DataFrame(all_candles, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "quote_volume", "trades", "taker_buy_base",
-        "taker_buy_quote", "ignore",
-    ])
+    df = pd.DataFrame(
+        all_candles,
+        columns=[
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_volume",
+            "trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "ignore",
+        ],
+    )
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
 
@@ -111,13 +122,19 @@ def resample_to_timeframe(df_1m: pd.DataFrame, target: str) -> pd.DataFrame:
         return df_1m
 
     df = df_1m.set_index("timestamp").copy()
-    resampled = df.resample(target).agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum",
-    }).dropna()
+    resampled = (
+        df.resample(target)
+        .agg(
+            {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+        )
+        .dropna()
+    )
     resampled = resampled.reset_index()
     return resampled
 
@@ -131,7 +148,7 @@ class SimulatedBasket:
         entry_price: float,
         bo_qty: float,
         bo_margin: float,
-        so_levels: List[Dict],
+        so_levels: list[dict],
         tp_target_usd: float,
         tp_price: float,
         leverage: int,
@@ -139,7 +156,7 @@ class SimulatedBasket:
         taker_fee: float = 0.0004,
         maker_fee: float = 0.0002,
         symbol: str = "BTCUSDT",
-        risk_config: Dict = None,
+        risk_config: dict = None,
     ):
         self.side = side
         self.entry_price = entry_price
@@ -147,7 +164,7 @@ class SimulatedBasket:
         self.total_qty = bo_qty
         self.total_margin = bo_margin
         self.so_levels = so_levels  # unfilled SOs
-        self.filled_so_indices: List[int] = []
+        self.filled_so_indices: list[int] = []
         self.tp_target_usd = tp_target_usd
         self.tp_price = tp_price
         self.leverage = leverage
@@ -156,7 +173,7 @@ class SimulatedBasket:
         self.maker_fee = maker_fee
         # ── Separated fee tracking ──
         self.trading_fees = bo_qty * entry_price * taker_fee  # BO is market (taker)
-        self.funding_paid = 0.0      # funding cost (always positive = expense)
+        self.funding_paid = 0.0  # funding cost (always positive = expense)
         self.funding_received = 0.0  # funding income (always positive = income)
         self.is_closed = False
         self.exit_price = 0.0
@@ -166,7 +183,7 @@ class SimulatedBasket:
         # Realistic execution delay — after SO fill, skip TP check for N bars
         self._bars_since_last_so_fill = 999  # large = no recent SO fill
         self._bars_open = 0
-        self._next_funding_time_ms: Optional[int] = None  # next funding event timestamp
+        self._next_funding_time_ms: int | None = None  # next funding event timestamp
         # Symbol for maintenance margin lookups
         self.symbol = symbol
         # Risk controller config
@@ -203,11 +220,15 @@ class SimulatedBasket:
             tp_filled = False
             if self.side == "LONG" and candle_high >= self.tp_price:
                 # Require wick to exceed TP by at least 0.02% for fill confidence
-                penetration = (candle_high - self.tp_price) / self.tp_price if self.tp_price > 0 else 0
+                penetration = (
+                    (candle_high - self.tp_price) / self.tp_price if self.tp_price > 0 else 0
+                )
                 if penetration >= 0.0002:
                     tp_filled = True
             elif self.side == "SHORT" and candle_low <= self.tp_price:
-                penetration = (self.tp_price - candle_low) / self.tp_price if self.tp_price > 0 else 0
+                penetration = (
+                    (self.tp_price - candle_low) / self.tp_price if self.tp_price > 0 else 0
+                )
                 if penetration >= 0.0002:
                     tp_filled = True
 
@@ -286,7 +307,9 @@ class SimulatedBasket:
         # For 1m candles, window is 60s; for 5m, 300s
         candle_end_ms = candle_open_ms + 300_000  # conservative: 5min window
 
-        mask = (funding_df["funding_time"] >= candle_open_ms) & (funding_df["funding_time"] < candle_end_ms)
+        mask = (funding_df["funding_time"] >= candle_open_ms) & (
+            funding_df["funding_time"] < candle_end_ms
+        )
         matching = funding_df[mask]
 
         if matching.empty:
@@ -351,11 +374,12 @@ class SimulatedBasket:
         else:
             self.pnl = (self.avg_entry - exit_price) * self.total_qty - total_cost
 
-    def to_dict(self, trade_id: int) -> Dict:
+    def to_dict(self, trade_id: int) -> dict:
         # Calculate duration
         duration_str = ""
         try:
             from dateutil import parser as dateparser
+
             t1 = dateparser.isoparse(self.entry_time)
             t2 = dateparser.isoparse(self.exit_time)
             delta = t2 - t1
@@ -407,7 +431,7 @@ class BacktestEngine:
     functions as the live bot — no special backtest logic.
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         self.symbol = config.get("symbol", "BTCUSDT")
         self.period_days = config.get("period_days", 7)
         self.initial_capital = config.get("initial_capital", 1000.0)
@@ -461,54 +485,68 @@ class BacktestEngine:
         # Minimum quantity / notional for each symbol (matches Binance exchange info)
         self.min_notional = {"BTCUSDT": 5.0, "ETHUSDT": 5.0, "SOLUSDT": 5.0, "XRPUSDT": 5.0}
         self.min_qty = {"BTCUSDT": 0.001, "ETHUSDT": 0.001, "SOLUSDT": 1.0, "XRPUSDT": 0.1}
-        self.qty_precision_step = {"BTCUSDT": 0.001, "ETHUSDT": 0.001, "SOLUSDT": 1.0, "XRPUSDT": 0.1}
-        self.tick_precision = {"BTCUSDT": 0.10, "ETHUSDT": 0.01, "SOLUSDT": 0.0010, "XRPUSDT": 0.0001}
+        self.qty_precision_step = {
+            "BTCUSDT": 0.001,
+            "ETHUSDT": 0.001,
+            "SOLUSDT": 1.0,
+            "XRPUSDT": 0.1,
+        }
+        self.tick_precision = {
+            "BTCUSDT": 0.10,
+            "ETHUSDT": 0.01,
+            "SOLUSDT": 0.0010,
+            "XRPUSDT": 0.0001,
+        }
 
     @staticmethod
     def _round_step(value: float, step: float) -> float:
         """Round down to nearest step size (same as live bot's round_step)."""
         if step <= 0:
             return value
-        from decimal import Decimal, ROUND_DOWN
+        from decimal import ROUND_DOWN, Decimal
+
         d_val = Decimal(str(value))
         d_step = Decimal(str(step))
-        return float((d_val / d_step).quantize(Decimal('1'), rounding=ROUND_DOWN) * d_step)
+        return float((d_val / d_step).quantize(Decimal("1"), rounding=ROUND_DOWN) * d_step)
 
     @staticmethod
     def _round_tick(value: float, tick: float) -> float:
         """Round price to nearest tick size (same as live bot's round_tick)."""
         if tick <= 0:
             return value
-        from decimal import Decimal, ROUND_DOWN
+        from decimal import ROUND_DOWN, Decimal
+
         d_val = Decimal(str(value))
         d_tick = Decimal(str(tick))
-        return float((d_val / d_tick).quantize(Decimal('1'), rounding=ROUND_DOWN) * d_tick)
+        return float((d_val / d_tick).quantize(Decimal("1"), rounding=ROUND_DOWN) * d_tick)
 
-    async def run(self) -> Dict[str, Any]:
+    async def run(self) -> dict[str, Any]:
         """Execute the full backtest and return results."""
-        logger.info(f"Starting backtest: {self.symbol}, {self.period_days}d, "
-                    f"capital=${self.initial_capital}, threshold={self.strategy['signal_threshold']}")
+        logger.info(
+            f"Starting backtest: {self.symbol}, {self.period_days}d, "
+            f"capital=${self.initial_capital}, threshold={self.strategy['signal_threshold']}"
+        )
 
         # 1. Fetch historical data — use custom dates if provided
         if self.start_date and self.end_date:
             try:
                 from dateutil import parser as dateparser
+
                 start_dt = dateparser.isoparse(self.start_date)
                 end_dt = dateparser.isoparse(self.end_date)
                 start_time = int(start_dt.timestamp() * 1000)
                 end_time = int(end_dt.timestamp() * 1000)
                 self.period_days = max(1, int((end_dt - start_dt).total_seconds() / 86400))
             except Exception:
-                end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+                end_time = int(datetime.now(UTC).timestamp() * 1000)
                 start_time = end_time - (self.period_days * 24 * 60 * 60 * 1000)
         else:
-            end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+            end_time = int(datetime.now(UTC).timestamp() * 1000)
             start_time = end_time - (self.period_days * 24 * 60 * 60 * 1000)
 
         # Always use 1m candles as base resolution — matches the live bot
         # which fetches 1m, 5m, and 1h klines from Binance. Using 5m as base
         # caused cooldown/resolution divergence from live behavior.
-        use_5m_base = False
         base_interval = "1m"
         logger.info(f"Using {base_interval} base candles for {self.period_days}d period")
 
@@ -516,11 +554,11 @@ class BacktestEngine:
         df_base = None
         data_source = "api"
         try:
-            from app.services.market_data_service import get_cached_klines
             from app.core.database import AsyncSessionLocal
+            from app.services.market_data_service import get_cached_klines
 
-            start_dt = datetime.fromtimestamp(start_time / 1000, tz=timezone.utc)
-            end_dt = datetime.fromtimestamp(end_time / 1000, tz=timezone.utc)
+            start_dt = datetime.fromtimestamp(start_time / 1000, tz=UTC)
+            end_dt = datetime.fromtimestamp(end_time / 1000, tz=UTC)
 
             async with AsyncSessionLocal() as _db_session:
                 df_base = await get_cached_klines(
@@ -531,7 +569,9 @@ class BacktestEngine:
                 logger.info(f"Cache hit: {len(df_base)} {base_interval} candles for {self.symbol}")
             else:
                 if df_base is not None:
-                    logger.info(f"Cache had only {len(df_base)} candles (need ≥100), falling back to API")
+                    logger.info(
+                        f"Cache had only {len(df_base)} candles (need ≥100), falling back to API"
+                    )
                 df_base = None
         except Exception as e:
             logger.warning(f"Cache lookup failed, falling back to API: {e}")
@@ -540,16 +580,22 @@ class BacktestEngine:
         # 1b. Fall back to Binance API if cache unavailable
         if df_base is None:
             data_source = "api"
-            df_base = await fetch_historical_klines(self.symbol, base_interval, start_time, end_time)
+            df_base = await fetch_historical_klines(
+                self.symbol, base_interval, start_time, end_time
+            )
 
         if df_base.empty or len(df_base) < 100:
-            raise ValueError(f"Insufficient data: only {len(df_base)} candles fetched for {self.symbol}")
+            raise ValueError(
+                f"Insufficient data: only {len(df_base)} candles fetched for {self.symbol}"
+            )
 
         # 2. Create multi-timeframe data — always from 1m base
         df_sim = df_base
         df_5m = resample_to_timeframe(df_base, "5min")
         df_1h = resample_to_timeframe(df_base, "1h")
-        logger.info(f"Data loaded: {len(df_sim)} 1m (sim), {len(df_5m)} 5m, {len(df_1h)} 1h candles")
+        logger.info(
+            f"Data loaded: {len(df_sim)} 1m (sim), {len(df_5m)} 5m, {len(df_1h)} 1h candles"
+        )
 
         # 2a. Prepare trend filter data (if enabled)
         df_4h = pd.DataFrame()
@@ -580,18 +626,18 @@ class BacktestEngine:
                 f"Base order too small for {self.symbol}. "
                 f"At current price ${sample_price:,.0f} with {s['leverage']}x leverage, "
                 f"minimum base order is ~${min_usd:.2f} USD "
-                f"(need {min_qty} {self.symbol.replace('USDT','')}, got {test_qty:.6f}). "
+                f"(need {min_qty} {self.symbol.replace('USDT', '')}, got {test_qty:.6f}). "
                 f"Increase base order or leverage."
             )
 
         # 3. Load funding rate data from cache (or fallback to synthetic)
         funding_df = None
         try:
-            from app.services.market_data_service import get_cached_funding_rates
             from app.core.database import AsyncSessionLocal
+            from app.services.market_data_service import get_cached_funding_rates
 
-            start_dt = datetime.fromtimestamp(start_time / 1000, tz=timezone.utc)
-            end_dt = datetime.fromtimestamp(end_time / 1000, tz=timezone.utc)
+            start_dt = datetime.fromtimestamp(start_time / 1000, tz=UTC)
+            end_dt = datetime.fromtimestamp(end_time / 1000, tz=UTC)
 
             async with AsyncSessionLocal() as _db_session:
                 funding_df = await get_cached_funding_rates(
@@ -608,18 +654,20 @@ class BacktestEngine:
         # Synthetic funding fallback: create a fake funding_df with 0.01% every 8h
         if funding_df is None:
             funding_times = list(range(start_time, end_time, 8 * 3600 * 1000))
-            funding_df = pd.DataFrame({
-                "funding_time": funding_times,
-                "funding_rate": [0.0001] * len(funding_times),
-                "mark_price": [0.0] * len(funding_times),
-            })
+            funding_df = pd.DataFrame(
+                {
+                    "funding_time": funding_times,
+                    "funding_rate": [0.0001] * len(funding_times),
+                    "mark_price": [0.0] * len(funding_times),
+                }
+            )
 
         # 4. Run simulation
         wallet = self.initial_capital
         locked_margin = 0.0  # Margin currently locked in active basket
-        equity_curve: List[Dict] = []
-        trades: List[Dict] = []
-        active_basket: Optional[SimulatedBasket] = None
+        equity_curve: list[dict] = []
+        trades: list[dict] = []
+        active_basket: SimulatedBasket | None = None
         trade_counter = 0
         peak_equity = self.initial_capital
         max_drawdown_pct = 0.0
@@ -629,9 +677,9 @@ class BacktestEngine:
         liquidation_time = ""
         liquidation_price = 0.0
         trend_blocked_count = 0  # Track how many signals the trend filter blocked
-        risk_stops_count = 0   # Track how many baskets the risk controller closed
+        risk_stops_count = 0  # Track how many baskets the risk controller closed
         peak_margin_used_pct = 0.0  # Track peak margin usage
-        trade_events: List[Dict] = []  # Chart markers for entries/exits/SO fills
+        trade_events: list[dict] = []  # Chart markers for entries/exits/SO fills
 
         # We need a lookback window for indicators
         lookback_sim = 100
@@ -643,7 +691,11 @@ class BacktestEngine:
 
         for i in range(lookback_sim, len(df_sim)):
             candle = df_sim.iloc[i]
-            ts = candle["timestamp"].isoformat() if hasattr(candle["timestamp"], "isoformat") else str(candle["timestamp"])
+            ts = (
+                candle["timestamp"].isoformat()
+                if hasattr(candle["timestamp"], "isoformat")
+                else str(candle["timestamp"])
+            )
             current_close = candle["close"]
             candle_high = candle["high"]
             candle_low = candle["low"]
@@ -654,7 +706,9 @@ class BacktestEngine:
             if active_basket and not active_basket.is_closed:
                 candle_open_ms = int(candle["open_time"]) if "open_time" in candle.index else 0
                 so_margin_used = active_basket.check_fills(
-                    candle_high, candle_low, ts,
+                    candle_high,
+                    candle_low,
+                    ts,
                     wallet_balance=wallet,
                     candle_open_time_ms=candle_open_ms,
                     funding_df=funding_df,
@@ -666,10 +720,15 @@ class BacktestEngine:
                     locked_margin += so_margin_used
                     # Record SO fill event for chart
                     so_count = len(active_basket.filled_so_indices)
-                    trade_events.append({
-                        "time": ts, "type": "SO_FILL", "price": round(current_close, 2),
-                        "trade_id": trade_counter + 1, "so_index": so_count,
-                    })
+                    trade_events.append(
+                        {
+                            "time": ts,
+                            "type": "SO_FILL",
+                            "price": round(current_close, 2),
+                            "trade_id": trade_counter + 1,
+                            "so_index": so_count,
+                        }
+                    )
                     # Track peak margin usage
                     total_account = wallet + locked_margin
                     if total_account > 0:
@@ -682,6 +741,7 @@ class BacktestEngine:
                 if not active_basket.is_closed and max_age_h > 0 and active_basket.entry_time:
                     try:
                         from dateutil import parser as dateparser
+
                         entry_dt = dateparser.isoparse(active_basket.entry_time)
                         current_dt = dateparser.isoparse(ts)
                         age_hours = (current_dt - entry_dt).total_seconds() / 3600
@@ -694,9 +754,7 @@ class BacktestEngine:
                 if not active_basket.is_closed:
                     unrealized = active_basket.get_unrealized_pnl(current_close)
                     notional = active_basket.total_qty * current_close
-                    margin_ratio = compute_margin_ratio(
-                        wallet, unrealized, notional, self.symbol
-                    )
+                    margin_ratio = compute_margin_ratio(wallet, unrealized, notional, self.symbol)
                     if margin_ratio >= 1.0:
                         active_basket.force_close(current_close, ts, "LIQUIDATED")
                         # Return locked margin + PnL
@@ -706,17 +764,25 @@ class BacktestEngine:
                             wallet = 0.0
                         trade_counter += 1
                         trades.append(active_basket.to_dict(trade_counter))
-                        trade_events.append({
-                            "time": ts, "type": "EXIT", "side": active_basket.side,
-                            "price": round(current_close, 2), "trade_id": trade_counter,
-                            "reason": "LIQUIDATED", "pnl": round(active_basket.pnl, 4),
-                        })
+                        trade_events.append(
+                            {
+                                "time": ts,
+                                "type": "EXIT",
+                                "side": active_basket.side,
+                                "price": round(current_close, 2),
+                                "trade_id": trade_counter,
+                                "reason": "LIQUIDATED",
+                                "pnl": round(active_basket.pnl, 4),
+                            }
+                        )
                         active_basket = None
                         liquidated = True
                         liquidation_time = ts
                         liquidation_price = current_close
-                        logger.warning(f"LIQUIDATED at {ts}, price=${current_close:,.2f}, "
-                                       f"margin_ratio={margin_ratio:.2f}. Wallet wiped.")
+                        logger.warning(
+                            f"LIQUIDATED at {ts}, price=${current_close:,.2f}, "
+                            f"margin_ratio={margin_ratio:.2f}. Wallet wiped."
+                        )
                         break
 
                 if active_basket is not None and active_basket.is_closed:
@@ -726,11 +792,17 @@ class BacktestEngine:
                     wallet += locked_margin + active_basket.pnl
                     locked_margin = 0.0
                     trade_counter += 1
-                    trade_events.append({
-                        "time": ts, "type": "EXIT", "side": active_basket.side,
-                        "price": round(current_close, 2), "trade_id": trade_counter,
-                        "reason": active_basket.exit_reason, "pnl": round(active_basket.pnl, 4),
-                    })
+                    trade_events.append(
+                        {
+                            "time": ts,
+                            "type": "EXIT",
+                            "side": active_basket.side,
+                            "price": round(current_close, 2),
+                            "trade_id": trade_counter,
+                            "reason": active_basket.exit_reason,
+                            "pnl": round(active_basket.pnl, 4),
+                        }
+                    )
                     trades.append(active_basket.to_dict(trade_counter))
                     active_basket = None
                     bars_since_last_close = 0
@@ -745,7 +817,7 @@ class BacktestEngine:
             # If no active basket, evaluate signals (with cooldown)
             if active_basket is None and bars_since_last_close >= cooldown_bars:
                 # Build lookback windows — use df_sim as the "1m-equivalent" window
-                window_1m = df_sim.iloc[max(0, i - lookback_sim):i + 1].copy()
+                window_1m = df_sim.iloc[max(0, i - lookback_sim) : i + 1].copy()
 
                 # Find corresponding 5m/1h windows
                 current_ts = candle["timestamp"]
@@ -757,7 +829,9 @@ class BacktestEngine:
 
                 if len(window_5m) >= 50 and len(window_1h) >= 14:
                     signals = evaluate_signals(
-                        window_1m, window_5m, window_1h,
+                        window_1m,
+                        window_5m,
+                        window_1h,
                         rsi_period=14,
                         rsi_long_threshold=self.strategy["rsi_long_threshold"],
                         rsi_short_threshold=self.strategy["rsi_short_threshold"],
@@ -809,6 +883,7 @@ class BacktestEngine:
                     if side and signals["atr"] > 0:
                         # Apply adverse slippage on BO entry (market order)
                         import random
+
                         slip_base = 0.0005  # 0.05% base adverse slippage
                         slip_rand = random.uniform(0, 0.0005)  # 0-0.05% random
                         if side == "LONG":
@@ -825,10 +900,15 @@ class BacktestEngine:
                             locked_margin = basket.total_margin
                             active_basket = basket
                             # Record entry event for chart
-                            trade_events.append({
-                                "time": ts, "type": "ENTRY", "side": side,
-                                "price": round(slipped_price, 2), "trade_id": trade_counter + 1,
-                            })
+                            trade_events.append(
+                                {
+                                    "time": ts,
+                                    "type": "ENTRY",
+                                    "side": side,
+                                    "price": round(slipped_price, 2),
+                                    "trade_id": trade_counter + 1,
+                                }
+                            )
                             # Track peak margin
                             total_account = wallet + locked_margin
                             if total_account > 0:
@@ -843,11 +923,13 @@ class BacktestEngine:
                     unrealized = active_basket.get_unrealized_pnl(current_close)
 
                 current_equity = wallet + unrealized
-                equity_curve.append({
-                    "timestamp": ts,
-                    "equity": round(current_equity, 2),
-                    "price": round(current_close, 2),
-                })
+                equity_curve.append(
+                    {
+                        "timestamp": ts,
+                        "equity": round(current_equity, 2),
+                        "price": round(current_close, 2),
+                    }
+                )
 
                 # Track drawdown
                 if current_equity > peak_equity:
@@ -906,18 +988,26 @@ class BacktestEngine:
             group = df_sim.iloc[start:end]
             first = group.iloc[0]
             last = group.iloc[-1]
-            ts = first["timestamp"].isoformat() if hasattr(first["timestamp"], "isoformat") else str(first["timestamp"])
-            price_data.append({
-                "timestamp": ts,
-                "open": round(float(first["open"]), 2),
-                "high": round(float(group["high"].max()), 2),
-                "low": round(float(group["low"].min()), 2),
-                "close": round(float(last["close"]), 2),
-            })
+            ts = (
+                first["timestamp"].isoformat()
+                if hasattr(first["timestamp"], "isoformat")
+                else str(first["timestamp"])
+            )
+            price_data.append(
+                {
+                    "timestamp": ts,
+                    "open": round(float(first["open"]), 2),
+                    "high": round(float(group["high"].max()), 2),
+                    "low": round(float(group["low"].min()), 2),
+                    "close": round(float(last["close"]), 2),
+                }
+            )
 
         liq_msg = " [LIQUIDATED]" if liquidated else ""
-        logger.info(f"Backtest complete{liq_msg}: {len(trades)} trades, PnL=${summary['total_pnl']:.2f} "
-                    f"({summary['total_pnl_pct']:.2f}%), WR={summary['win_rate']:.1f}%")
+        logger.info(
+            f"Backtest complete{liq_msg}: {len(trades)} trades, PnL=${summary['total_pnl']:.2f} "
+            f"({summary['total_pnl_pct']:.2f}%), WR={summary['win_rate']:.1f}%"
+        )
         # All trades (including END_OF_DATA) are already in the trades list
         display_trades = trades.copy()
 
@@ -940,7 +1030,7 @@ class BacktestEngine:
 
     def _try_open_basket(
         self, side: str, price: float, atr: float, wallet: float, timestamp: str
-    ) -> Optional[SimulatedBasket]:
+    ) -> SimulatedBasket | None:
         """Try to open a simulated basket. Returns None if insufficient capital."""
         s = self.strategy
 
@@ -983,7 +1073,9 @@ class BacktestEngine:
         min_not = self.min_notional.get(self.symbol, 5.0)
         bo_notional = bo_qty * price
         if bo_notional < min_not:
-            logger.debug(f"Basket rejected: notional ${bo_notional:.2f} < min ${min_not} for {self.symbol}")
+            logger.debug(
+                f"Basket rejected: notional ${bo_notional:.2f} < min ${min_not} for {self.symbol}"
+            )
             return None
 
         if bo["margin"] > wallet * 0.5:
@@ -1019,9 +1111,12 @@ class BacktestEngine:
         )
 
     def _calculate_summary(
-        self, trades: List[Dict], max_drawdown_pct: float, final_wallet: float,
-        open_trade: Dict = None,
-    ) -> Dict[str, Any]:
+        self,
+        trades: list[dict],
+        max_drawdown_pct: float,
+        final_wallet: float,
+        open_trade: dict = None,
+    ) -> dict[str, Any]:
         """Calculate performance summary metrics (includes ALL trades including END_OF_DATA)."""
         open_pnl = open_trade["pnl"] if open_trade else 0.0
 
@@ -1067,7 +1162,9 @@ class BacktestEngine:
         # Profit factor
         gross_profit = sum(winning) if winning else 0
         gross_loss = abs(sum(losing)) if losing else 0
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0)
+        profit_factor = (
+            gross_profit / gross_loss if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0)
+        )
 
         avg_sos = np.mean([t.get("sos_filled", 0) for t in trades])
 
@@ -1093,4 +1190,3 @@ class BacktestEngine:
             "has_open_trade": open_trade is not None,
             "open_trade_pnl": round(open_pnl, 4),
         }
-

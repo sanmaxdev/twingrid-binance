@@ -5,16 +5,20 @@ POST /user-backtest/run   - Run a backtest (checks quota + plan access)
 GET  /user-backtest/usage - Get today's usage and quota info
 GET  /user-backtest/history - Get user's backtest history
 """
-import logging
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
 
-from app.api.deps import get_db, get_current_user
-from app.models.user import User
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db
 from app.models.backtest_history import BacktestHistory
+from app.models.user import User
 from app.services.subscription_service import (
-    check_backtest_access, increment_backtest_usage, get_user_plan
+    check_backtest_access,
+    get_user_plan,
+    increment_backtest_usage,
 )
 
 router = APIRouter()
@@ -61,7 +65,7 @@ async def run_user_backtest(
                     "code": "no_backtest_access",
                     "message": "Backtest Engine requires a Pro or Elite subscription.",
                     "plan": access["plan"],
-                }
+                },
             )
         elif access["reason"] == "daily_limit_reached":
             raise HTTPException(
@@ -71,7 +75,7 @@ async def run_user_backtest(
                     "message": f"You have used all {access['daily_limit']} backtests for today. Limit resets at midnight UTC.",
                     "used_today": access["used_today"],
                     "daily_limit": access["daily_limit"],
-                }
+                },
             )
 
     # Validate period_days against plan max
@@ -85,7 +89,7 @@ async def run_user_backtest(
                 "message": f"Your plan allows a maximum backtest period of {max_days} days.",
                 "max_days": max_days,
                 "requested": period_days,
-            }
+            },
         )
 
     # Increment usage BEFORE running (prevents gaming)
@@ -141,12 +145,12 @@ async def run_user_backtest(
                 "used_today": new_count,
                 "daily_limit": access["daily_limit"],
                 "remaining_today": max(0, (access["daily_limit"] or 0) - new_count),
-            }
+            },
         }
 
     except Exception as e:
         logger.error(f"User backtest failed for {current_user.id}: {e}")
-        raise HTTPException(500, detail="Backtest execution failed. Please try again.")
+        raise HTTPException(500, detail="Backtest execution failed. Please try again.") from e
 
 
 @router.get("/history")

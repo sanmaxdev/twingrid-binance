@@ -1,6 +1,6 @@
+from typing import Any
+
 import pandas as pd
-import numpy as np
-from typing import Dict, Any
 
 
 def calculate_rsi(closes: pd.Series, period: int = 14) -> pd.Series:
@@ -24,21 +24,25 @@ def calculate_rsi(closes: pd.Series, period: int = 14) -> pd.Series:
     return rsi
 
 
-def calculate_bollinger_bands(closes: pd.Series, period: int = 20, std_dev: float = 2.0) -> pd.DataFrame:
+def calculate_bollinger_bands(
+    closes: pd.Series, period: int = 20, std_dev: float = 2.0
+) -> pd.DataFrame:
     sma = closes.rolling(window=period).mean()
     std = closes.rolling(window=period).std(ddof=0)
 
     upper = sma + (std_dev * std)
     lower = sma - (std_dev * std)
 
-    return pd.DataFrame({'middle': sma, 'upper': upper, 'lower': lower})
+    return pd.DataFrame({"middle": sma, "upper": upper, "lower": lower})
 
 
 def calculate_ema(closes: pd.Series, period: int = 50) -> pd.Series:
     return closes.ewm(span=period, adjust=False).mean()
 
 
-def calculate_atr(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int = 14) -> pd.Series:
+def calculate_atr(
+    highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int = 14
+) -> pd.Series:
     tr1 = highs - lows
     tr2 = (highs - closes.shift()).abs()
     tr3 = (lows - closes.shift()).abs()
@@ -53,7 +57,9 @@ def calculate_atr(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: 
     return atr
 
 
-def calculate_macd(closes: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, pd.Series]:
+def calculate_macd(
+    closes: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
+) -> dict[str, pd.Series]:
     """Calculate MACD line, signal line, and histogram."""
     ema_fast = closes.ewm(span=fast, adjust=False).mean()
     ema_slow = closes.ewm(span=slow, adjust=False).mean()
@@ -85,7 +91,7 @@ def evaluate_signals(
     ema_slope_threshold: float = 0.001,
     atr_period: int = 14,
     signal_threshold: int = 55,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Evaluates trading signals using a weighted scoring system.
 
@@ -106,24 +112,23 @@ def evaluate_signals(
         return {"long": False, "short": False, "atr": 0.0, "long_score": 0, "short_score": 0}
 
     # ── Calculate indicators on 1m data ──
-    rsi = calculate_rsi(df_1m['close'], rsi_period)
-    bb = calculate_bollinger_bands(df_1m['close'], bb_period, bb_std)
-    macd_data = calculate_macd(df_1m['close'], fast=12, slow=26, signal=9)
+    rsi = calculate_rsi(df_1m["close"], rsi_period)
+    bb = calculate_bollinger_bands(df_1m["close"], bb_period, bb_std)
+    macd_data = calculate_macd(df_1m["close"], fast=12, slow=26, signal=9)
 
     # ── Calculate indicators on 5m data ──
-    ema_5m = calculate_ema(df_5m['close'], ema_period)
-    rsi_5m = calculate_rsi(df_5m['close'], rsi_period)
+    ema_5m = calculate_ema(df_5m["close"], ema_period)
+    rsi_5m = calculate_rsi(df_5m["close"], rsi_period)
 
     # ── Calculate ATR on 1h data ──
-    atr = calculate_atr(df_1h['high'], df_1h['low'], df_1h['close'], atr_period)
+    atr = calculate_atr(df_1h["high"], df_1h["low"], df_1h["close"], atr_period)
 
     # ── Get latest values ──
-    current_close = df_1m['close'].iloc[-1]
-    prev_close = df_1m['close'].iloc[-2] if len(df_1m) > 1 else current_close
+    current_close = df_1m["close"].iloc[-1]
+    prev_close = df_1m["close"].iloc[-2] if len(df_1m) > 1 else current_close
     current_rsi = rsi.iloc[-1]
-    current_bb_lower = bb['lower'].iloc[-1]
-    current_bb_upper = bb['upper'].iloc[-1]
-    current_bb_middle = bb['middle'].iloc[-1]
+    current_bb_lower = bb["lower"].iloc[-1]
+    current_bb_upper = bb["upper"].iloc[-1]
     current_atr = atr.iloc[-1]
 
     # MACD values
@@ -165,7 +170,7 @@ def evaluate_signals(
     elif macd_hist > prev_macd_hist and macd_hist < 0:
         long_score += 12  # Histogram rising (momentum shifting bullish)
     elif macd_line > macd_signal:
-        long_score += 8   # Already in bullish MACD territory
+        long_score += 8  # Already in bullish MACD territory
 
     # 4. EMA Trend Score (0–15 pts) — price near or below EMA = buy dip
     if current_close < ema_5m_now:
@@ -181,7 +186,7 @@ def evaluate_signals(
     # 5. Price Action Score (0–10 pts) — bullish candle patterns
     if current_close > prev_close:
         long_score += 5  # Green candle
-        if df_1m['low'].iloc[-1] < current_bb_lower and current_close > current_bb_lower:
+        if df_1m["low"].iloc[-1] < current_bb_lower and current_close > current_bb_lower:
             long_score += 5  # Wick below BB lower but closed above = hammer-like
 
     # ── SHORT SCORING ──
@@ -222,7 +227,7 @@ def evaluate_signals(
     # 5. Price Action Score (0–10 pts)
     if current_close < prev_close:
         short_score += 5
-        if df_1m['high'].iloc[-1] > current_bb_upper and current_close < current_bb_upper:
+        if df_1m["high"].iloc[-1] > current_bb_upper and current_close < current_bb_upper:
             short_score += 5  # Wick above BB upper but closed below = shooting star
 
     # ── DETERMINE SIGNALS ──

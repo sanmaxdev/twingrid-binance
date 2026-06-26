@@ -5,18 +5,15 @@ Uses Google Gemini with function calling to autonomously run backtests,
 analyze results, and find optimal Twin Grid strategy parameters.
 """
 
-import json
-import uuid
-import asyncio
-from datetime import datetime, timezone
-from typing import AsyncGenerator, Dict, Any, List, Optional
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import structlog
 from google import genai
 from google.genai import types
 
-from app.strategy.backtest_engine import BacktestEngine
 from app.core.config import settings
+from app.strategy.backtest_engine import BacktestEngine
 
 logger = structlog.get_logger(__name__)
 
@@ -154,21 +151,35 @@ RUN_BACKTEST_DECLARATION = types.FunctionDeclaration(
     parameters=types.Schema(
         type="OBJECT",
         properties={
-            "symbol": types.Schema(type="STRING", enum=["BTCUSDT", "ETHUSDT", "SOLUSDT"], description="Trading pair"),
+            "symbol": types.Schema(
+                type="STRING", enum=["BTCUSDT", "ETHUSDT", "SOLUSDT"], description="Trading pair"
+            ),
             "initial_capital": types.Schema(type="NUMBER", description="Starting capital in USD"),
             "leverage": types.Schema(type="INTEGER", description="Position leverage (1-20)"),
-            "base_order_pct": types.Schema(type="NUMBER", description="Base order as % of capital (1-10)"),
-            "max_safety_orders": types.Schema(type="INTEGER", description="Max safety orders (1-15)"),
-            "take_profit_pct": types.Schema(type="NUMBER", description="Take profit target % (0.3-5.0)"),
-            "volume_scale": types.Schema(type="NUMBER", description="SO volume multiplier (1.0-3.0)"),
+            "base_order_pct": types.Schema(
+                type="NUMBER", description="Base order as % of capital (1-10)"
+            ),
+            "max_safety_orders": types.Schema(
+                type="INTEGER", description="Max safety orders (1-15)"
+            ),
+            "take_profit_pct": types.Schema(
+                type="NUMBER", description="Take profit target % (0.3-5.0)"
+            ),
+            "volume_scale": types.Schema(
+                type="NUMBER", description="SO volume multiplier (1.0-3.0)"
+            ),
             "step_scale": types.Schema(type="NUMBER", description="SO step multiplier (1.0-2.0)"),
-            "signal_threshold": types.Schema(type="INTEGER", description="Entry signal threshold (40-70)"),
+            "signal_threshold": types.Schema(
+                type="INTEGER", description="Entry signal threshold (40-70)"
+            ),
             "atr_multiplier": types.Schema(type="NUMBER", description="ATR grid spacing (0.3-1.5)"),
             "allow_long": types.Schema(type="BOOLEAN", description="Allow long positions"),
             "allow_short": types.Schema(type="BOOLEAN", description="Allow short positions"),
             "trend_filter_enabled": types.Schema(type="BOOLEAN", description="Enable trend filter"),
             "compounding": types.Schema(type="BOOLEAN", description="Enable compounding"),
-            "label": types.Schema(type="STRING", description="Short label for this test (e.g. 'baseline', 'high_tp')"),
+            "label": types.Schema(
+                type="STRING", description="Short label for this test (e.g. 'baseline', 'high_tp')"
+            ),
         },
         required=["symbol", "initial_capital", "label"],
     ),
@@ -232,7 +243,7 @@ MIN_QTY = {"BTCUSDT": 0.001, "ETHUSDT": 0.001, "SOLUSDT": 1.0}
 APPROX_PRICES = {"BTCUSDT": 95000, "ETHUSDT": 1800, "SOLUSDT": 150}
 
 
-async def execute_run_backtest(args: Dict[str, Any]) -> Dict[str, Any]:
+async def execute_run_backtest(args: dict[str, Any]) -> dict[str, Any]:
     """Execute a backtest with the given parameters. Returns summary only (no chart data)."""
     config = DEFAULT_CONFIG.copy()
 
@@ -285,12 +296,14 @@ async def execute_run_backtest(args: Dict[str, Any]) -> Dict[str, Any]:
         min_capital = (min_q * approx_price) / (lev * (bo_pct / 100.0))
         return {
             "error": f"Base order too small. With ${capital} capital, {bo_pct}% BO, {lev}x leverage: "
-                     f"qty={est_qty:.6f} < min {min_q}. "
-                     f"Either increase base_order_pct to {max(bo_pct, round((min_q * approx_price * 1.2) / (capital * lev) * 100, 1))}% "
-                     f"or use capital >= ${min_capital:.0f}.",
+            f"qty={est_qty:.6f} < min {min_q}. "
+            f"Either increase base_order_pct to {max(bo_pct, round((min_q * approx_price * 1.2) / (capital * lev) * 100, 1))}% "
+            f"or use capital >= ${min_capital:.0f}.",
             "label": label,
             "suggestion": {
-                "min_base_order_pct": round((min_q * approx_price * 1.2) / (capital * lev) * 100, 1),
+                "min_base_order_pct": round(
+                    (min_q * approx_price * 1.2) / (capital * lev) * 100, 1
+                ),
                 "min_capital_at_current_pct": round(min_capital),
             },
         }
@@ -345,7 +358,7 @@ async def execute_run_backtest(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": str(e), "label": label}
 
 
-def execute_get_strategy_info() -> Dict[str, Any]:
+def execute_get_strategy_info() -> dict[str, Any]:
     """Return default strategy config and parameter documentation."""
     return {
         "default_config": {
@@ -381,7 +394,7 @@ def execute_get_strategy_info() -> Dict[str, Any]:
     }
 
 
-def execute_compare_results(all_results: List[Dict]) -> Dict[str, Any]:
+def execute_compare_results(all_results: list[dict]) -> dict[str, Any]:
     """Compare all results collected so far, ranked by Sharpe ratio."""
     if not all_results:
         return {"message": "No results to compare yet. Run some backtests first."}
@@ -390,19 +403,21 @@ def execute_compare_results(all_results: List[Dict]) -> Dict[str, Any]:
 
     comparison = []
     for i, r in enumerate(ranked):
-        comparison.append({
-            "rank": i + 1,
-            "label": r.get("label", "?"),
-            "symbol": r.get("symbol", "?"),
-            "capital": r.get("capital", 0),
-            "pnl_pct": r.get("total_pnl_pct", 0),
-            "sharpe": r.get("sharpe_ratio", 0),
-            "max_dd": r.get("max_drawdown_pct", 0),
-            "win_rate": r.get("win_rate", 0),
-            "profit_factor": r.get("profit_factor", 0),
-            "trades": r.get("total_trades", 0),
-            "liquidated": r.get("liquidated", False),
-        })
+        comparison.append(
+            {
+                "rank": i + 1,
+                "label": r.get("label", "?"),
+                "symbol": r.get("symbol", "?"),
+                "capital": r.get("capital", 0),
+                "pnl_pct": r.get("total_pnl_pct", 0),
+                "sharpe": r.get("sharpe_ratio", 0),
+                "max_dd": r.get("max_drawdown_pct", 0),
+                "win_rate": r.get("win_rate", 0),
+                "profit_factor": r.get("profit_factor", 0),
+                "trades": r.get("total_trades", 0),
+                "liquidated": r.get("liquidated", False),
+            }
+        )
 
     best = ranked[0] if ranked else None
     return {
@@ -416,10 +431,11 @@ def execute_compare_results(all_results: List[Dict]) -> Dict[str, Any]:
 
 # ─── Agent Loop ──────────────────────────────────────────────────────────────────
 
+
 async def run_agent(
     goal: str,
     symbol: str = "BTCUSDT",
-) -> AsyncGenerator[Dict[str, Any], None]:
+) -> AsyncGenerator[dict[str, Any], None]:
     """
     Run the Gemini AI agent with function calling.
     Yields SSE events as dicts: {event: str, data: dict}
@@ -430,11 +446,15 @@ async def run_agent(
 
     client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
-    tools = [types.Tool(function_declarations=[
-        RUN_BACKTEST_DECLARATION,
-        GET_STRATEGY_INFO_DECLARATION,
-        COMPARE_RESULTS_DECLARATION,
-    ])]
+    tools = [
+        types.Tool(
+            function_declarations=[
+                RUN_BACKTEST_DECLARATION,
+                GET_STRATEGY_INFO_DECLARATION,
+                COMPARE_RESULTS_DECLARATION,
+            ]
+        )
+    ]
 
     config = types.GenerateContentConfig(
         tools=tools,
@@ -452,11 +472,11 @@ async def run_agent(
         f"Run a baseline first, then iterate to find optimal settings."
     )
 
-    contents: List[types.Content] = [
+    contents: list[types.Content] = [
         types.Content(role="user", parts=[types.Part(text=user_prompt)])
     ]
 
-    all_results: List[Dict] = []
+    all_results: list[dict] = []
     backtest_count = 0
     max_backtests = 12
     max_turns = 30
@@ -469,7 +489,7 @@ async def run_agent(
 
     for model_name in model_candidates:
         try:
-            test_response = client.models.generate_content(
+            client.models.generate_content(
                 model=model_name,
                 contents="respond with OK",
                 config=types.GenerateContentConfig(max_output_tokens=10),
@@ -534,7 +554,9 @@ async def run_agent(
                 result = None
                 if func_name == "run_backtest":
                     if backtest_count >= max_backtests:
-                        result = {"error": f"Maximum {max_backtests} backtests reached. Present your final recommendation now."}
+                        result = {
+                            "error": f"Maximum {max_backtests} backtests reached. Present your final recommendation now."
+                        }
                     else:
                         if "symbol" not in func_args:
                             func_args["symbol"] = symbol
@@ -566,9 +588,7 @@ async def run_agent(
                 )
 
         if has_function_call and function_response_parts:
-            contents.append(
-                types.Content(role="user", parts=function_response_parts)
-            )
+            contents.append(types.Content(role="user", parts=function_response_parts))
             continue
 
         # No function calls — agent is done

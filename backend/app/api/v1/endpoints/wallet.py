@@ -1,24 +1,24 @@
 """User wallet endpoints — balance, deposits, transaction history."""
 
-from datetime import datetime, timezone
-from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 
-from app.api.deps import get_db, get_current_user
-from app.models.user import User
-from app.models.fee_transaction import FeeTransaction
-from app.models.deposit_request import DepositRequest
-from app.models.platform_settings import PlatformSettings
-from app.models.user_subscription import UserSubscription
-from app.models.subscription_plan import SubscriptionPlan
+from app.api.deps import get_current_user, get_db
 from app.core.enums import DepositStatus, FeeTransactionType
-from app.services.fee_service import (
-    get_fee_percentage, is_fee_enabled, calculate_minimum_balance, get_fee_setting
-)
+from app.models.deposit_request import DepositRequest
+from app.models.fee_transaction import FeeTransaction
+from app.models.subscription_plan import SubscriptionPlan
+from app.models.user import User
+from app.models.user_subscription import UserSubscription
 from app.schemas.fee import (
-    DepositSubmitRequest, WalletBalanceResponse, WalletSummaryResponse,
+    DepositSubmitRequest,
+)
+from app.services.fee_service import (
+    calculate_minimum_balance,
+    get_fee_percentage,
+    get_fee_setting,
+    is_fee_enabled,
 )
 
 router = APIRouter()
@@ -35,8 +35,9 @@ async def get_wallet_balance(
     balance = float(current_user.twin_grid_balance)
 
     # Calculate minimum from all active accounts (running or paused, not deleted)
-    from app.models.account import Account
     from app.core.enums import AccountStatus
+    from app.models.account import Account
+
     result = await db.execute(
         select(Account).where(
             Account.user_id == current_user.id,
@@ -72,11 +73,17 @@ async def get_wallet_balance(
                     plan_default_fee = float(plan_obj.default_fee_pct)
 
             admin_override = True
-            plan_info = f" (your {user_sub.plan_id.title()} plan rate is {plan_default_fee}%)" if plan_default_fee is not None else ""
+            plan_info = (
+                f" (your {user_sub.plan_id.title()} plan rate is {plan_default_fee}%)"
+                if plan_default_fee is not None
+                else ""
+            )
             override_note = f"Your profit share fee has been customised to {fee_pct}% by an administrator{plan_info}."
         except Exception:
             admin_override = True
-            override_note = f"Your profit share fee has been customised to {fee_pct}% by an administrator."
+            override_note = (
+                f"Your profit share fee has been customised to {fee_pct}% by an administrator."
+            )
 
     return {
         "balance": balance,
@@ -99,28 +106,36 @@ async def get_wallet_summary(
     fee_pct = float(await get_fee_percentage(db, current_user.id))
 
     # Total deposited
-    total_deposited = (await db.execute(
-        select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
-            FeeTransaction.user_id == current_user.id,
-            FeeTransaction.type == FeeTransactionType.DEPOSIT,
+    total_deposited = (
+        await db.execute(
+            select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
+                FeeTransaction.user_id == current_user.id,
+                FeeTransaction.type == FeeTransactionType.DEPOSIT,
+            )
         )
-    )).scalar()
+    ).scalar()
 
     # Total fees paid (absolute value of deductions)
-    total_fees = (await db.execute(
-        select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
-            FeeTransaction.user_id == current_user.id,
-            FeeTransaction.type == FeeTransactionType.FEE_DEDUCTION,
+    total_fees = (
+        await db.execute(
+            select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
+                FeeTransaction.user_id == current_user.id,
+                FeeTransaction.type == FeeTransactionType.FEE_DEDUCTION,
+            )
         )
-    )).scalar()
+    ).scalar()
 
     # Pending deposits count
-    pending_count = (await db.execute(
-        select(func.count()).select_from(DepositRequest).where(
-            DepositRequest.user_id == current_user.id,
-            DepositRequest.status == DepositStatus.PENDING,
+    pending_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(DepositRequest)
+            .where(
+                DepositRequest.user_id == current_user.id,
+                DepositRequest.status == DepositStatus.PENDING,
+            )
         )
-    )).scalar()
+    ).scalar()
 
     return {
         "balance": balance,
@@ -147,9 +162,7 @@ async def get_transactions(
         # Exclude affiliate commissions from the wallet view — they belong to /affiliates
         stmt = stmt.where(FeeTransaction.type != FeeTransactionType.AFFILIATE_COMMISSION)
 
-    count_result = await db.execute(
-        select(func.count()).select_from(stmt.subquery())
-    )
+    count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
     total = count_result.scalar()
 
     stmt = stmt.order_by(FeeTransaction.created_at.desc())
@@ -191,20 +204,16 @@ async def submit_deposit(
     min_deposit = float(str(min_deposit_raw))
 
     if body.amount < min_deposit:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Minimum deposit is ${min_deposit:.2f} USDT"
-        )
+        raise HTTPException(status_code=400, detail=f"Minimum deposit is ${min_deposit:.2f} USDT")
 
     # Check for duplicate TX hash
-    existing = (await db.execute(
-        select(DepositRequest).where(DepositRequest.tx_hash == body.tx_hash)
-    )).scalar_one_or_none()
+    existing = (
+        await db.execute(select(DepositRequest).where(DepositRequest.tx_hash == body.tx_hash))
+    ).scalar_one_or_none()
 
     if existing:
         raise HTTPException(
-            status_code=400,
-            detail="This transaction hash has already been submitted"
+            status_code=400, detail="This transaction hash has already been submitted"
         )
 
     deposit = DepositRequest(
@@ -235,9 +244,7 @@ async def get_deposits(
     """List user's deposit requests with status."""
     stmt = select(DepositRequest).where(DepositRequest.user_id == current_user.id)
 
-    count_result = await db.execute(
-        select(func.count()).select_from(stmt.subquery())
-    )
+    count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
     total = count_result.scalar()
 
     stmt = stmt.order_by(DepositRequest.created_at.desc())

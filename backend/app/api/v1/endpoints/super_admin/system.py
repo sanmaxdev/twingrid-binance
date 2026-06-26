@@ -1,14 +1,13 @@
 import logging
-import platform
 import os
-import asyncio
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Dict, Any, Optional
+import platform
+from datetime import UTC, datetime
+from typing import Any
 
-from app.api.deps import get_current_user, require_admin
+from fastapi import APIRouter, Depends, Query
+
+from app.api.deps import require_admin
 from app.models.user import User
-from app.core.enums import Role
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -17,7 +16,7 @@ logger = logging.getLogger(__name__)
 @router.get("/system/resources")
 async def get_system_resources(
     current_user: User = Depends(require_admin),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get host system resource usage: CPU, RAM, Disk, Network, Uptime."""
     import psutil
 
@@ -38,8 +37,8 @@ async def get_system_resources(
     net = psutil.net_io_counters()
 
     # Uptime
-    boot_time = datetime.fromtimestamp(psutil.boot_time(), tz=timezone.utc)
-    uptime_seconds = (datetime.now(timezone.utc) - boot_time).total_seconds()
+    boot_time = datetime.fromtimestamp(psutil.boot_time(), tz=UTC)
+    uptime_seconds = (datetime.now(UTC) - boot_time).total_seconds()
 
     # Load averages (Linux/Mac only)
     try:
@@ -50,15 +49,20 @@ async def get_system_resources(
     # Top processes by memory
     top_processes = []
     try:
-        for proc in sorted(psutil.process_iter(["pid", "name", "memory_percent", "cpu_percent"]),
-                           key=lambda p: p.info.get("memory_percent", 0) or 0, reverse=True)[:8]:
+        for proc in sorted(
+            psutil.process_iter(["pid", "name", "memory_percent", "cpu_percent"]),
+            key=lambda p: p.info.get("memory_percent", 0) or 0,
+            reverse=True,
+        )[:8]:
             info = proc.info
-            top_processes.append({
-                "pid": info.get("pid"),
-                "name": info.get("name", "unknown"),
-                "memory_percent": round(info.get("memory_percent", 0) or 0, 1),
-                "cpu_percent": round(info.get("cpu_percent", 0) or 0, 1),
-            })
+            top_processes.append(
+                {
+                    "pid": info.get("pid"),
+                    "name": info.get("name", "unknown"),
+                    "memory_percent": round(info.get("memory_percent", 0) or 0, 1),
+                    "cpu_percent": round(info.get("cpu_percent", 0) or 0, 1),
+                }
+            )
     except Exception:
         pass
 
@@ -73,23 +77,23 @@ async def get_system_resources(
             "load_avg_15m": round(load_avg[2], 2),
         },
         "memory": {
-            "total_gb": round(mem.total / (1024 ** 3), 2),
-            "used_gb": round(mem.used / (1024 ** 3), 2),
-            "available_gb": round(mem.available / (1024 ** 3), 2),
+            "total_gb": round(mem.total / (1024**3), 2),
+            "used_gb": round(mem.used / (1024**3), 2),
+            "available_gb": round(mem.available / (1024**3), 2),
             "usage_percent": mem.percent,
-            "swap_total_gb": round(swap.total / (1024 ** 3), 2),
-            "swap_used_gb": round(swap.used / (1024 ** 3), 2),
+            "swap_total_gb": round(swap.total / (1024**3), 2),
+            "swap_used_gb": round(swap.used / (1024**3), 2),
             "swap_percent": swap.percent,
         },
         "disk": {
-            "total_gb": round(disk.total / (1024 ** 3), 2),
-            "used_gb": round(disk.used / (1024 ** 3), 2),
-            "free_gb": round(disk.free / (1024 ** 3), 2),
+            "total_gb": round(disk.total / (1024**3), 2),
+            "used_gb": round(disk.used / (1024**3), 2),
+            "free_gb": round(disk.free / (1024**3), 2),
             "usage_percent": round(disk.percent, 1),
         },
         "network": {
-            "bytes_sent_mb": round(net.bytes_sent / (1024 ** 2), 1),
-            "bytes_recv_mb": round(net.bytes_recv / (1024 ** 2), 1),
+            "bytes_sent_mb": round(net.bytes_sent / (1024**2), 1),
+            "bytes_recv_mb": round(net.bytes_recv / (1024**2), 1),
             "packets_sent": net.packets_sent,
             "packets_recv": net.packets_recv,
         },
@@ -110,7 +114,7 @@ async def get_system_logs(
     lines: int = Query(default=100, le=500, ge=10),
     level: str = Query(default="all"),
     current_user: User = Depends(require_admin),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get recent application logs from in-memory ring buffer."""
     from app.core.logging import log_buffer
 
@@ -119,7 +123,7 @@ async def get_system_logs(
     # Optional level filter
     if level != "all":
         level_upper = level.upper()
-        all_logs = [l for l in all_logs if f"[{level_upper}]" in l]
+        all_logs = [line for line in all_logs if f"[{level_upper}]" in line]
 
     return {
         "service": "backend",
@@ -131,11 +135,10 @@ async def get_system_logs(
     }
 
 
-
 @router.post("/system/docker-prune")
 async def prune_docker_build_cache(
     current_user: User = Depends(require_admin),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Prune Docker builder cache, dangling images, stopped containers, and unused networks.
     Uses the Docker Python SDK via the unix socket (works inside containers with socket mounted).
@@ -145,6 +148,7 @@ async def prune_docker_build_cache(
 
     try:
         import docker  # type: ignore
+
         client = docker.DockerClient(base_url="unix://var/run/docker.sock")
 
         # 1. Prune stopped containers
@@ -194,7 +198,8 @@ async def prune_docker_build_cache(
 
     except ImportError:
         # Docker SDK not installed — fall back to CLI via subprocess
-        import asyncio, re
+        import asyncio
+        import re
 
         async def run_cmd(cmd: list) -> tuple:
             proc = await asyncio.create_subprocess_exec(
@@ -207,7 +212,7 @@ async def prune_docker_build_cache(
 
         for step, cmd in [
             ("builder_prune", ["docker", "builder", "prune", "-af"]),
-            ("image_prune",   ["docker", "image",   "prune", "-af"]),
+            ("image_prune", ["docker", "image", "prune", "-af"]),
             ("container_prune", ["docker", "container", "prune", "-f"]),
         ]:
             try:
@@ -217,15 +222,17 @@ async def prune_docker_build_cache(
                     val, unit = float(m.group(1)), m.group(2)
                     mult = {"GB": 1024**3, "MB": 1024**2, "kB": 1024, "B": 1}.get(unit, 1)
                     total_freed_bytes += int(val * mult)
-                results.append({"step": step, "success": code == 0, "output": (out + err).strip()[:300]})
+                results.append(
+                    {"step": step, "success": code == 0, "output": (out + err).strip()[:300]}
+                )
             except Exception as e:
                 results.append({"step": step, "success": False, "output": str(e)})
 
     except Exception as e:
         results.append({"step": "docker_sdk", "success": False, "output": str(e)})
 
-    freed_gb = round(total_freed_bytes / (1024 ** 3), 2)
-    freed_mb = round(total_freed_bytes / (1024 ** 2), 1)
+    freed_gb = round(total_freed_bytes / (1024**3), 2)
+    freed_mb = round(total_freed_bytes / (1024**2), 1)
     freed_label = f"{freed_gb} GB" if freed_gb >= 0.1 else f"{freed_mb} MB"
 
     logger.info(f"Docker pruned by admin {current_user.email} — freed {freed_label}")
@@ -236,5 +243,3 @@ async def prune_docker_build_cache(
         "freed_label": freed_label,
         "steps": results,
     }
-
-

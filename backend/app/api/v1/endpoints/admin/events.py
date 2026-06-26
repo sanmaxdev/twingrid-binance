@@ -1,15 +1,14 @@
 """Admin event feed endpoint."""
 
 from datetime import datetime
-from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 
 from app.api.deps import get_db, require_admin
-from app.models.user import User
 from app.models.event import Event
+from app.models.user import User
 
 router = APIRouter()
 
@@ -22,8 +21,8 @@ async def list_events(
     per_page: int = Query(50, ge=1, le=100),
     severity: str = Query(None),
     event_type: str = Query(None),
-    start_date: Optional[str] = Query(None, description="ISO date, e.g. 2026-04-01"),
-    end_date: Optional[str] = Query(None, description="ISO date, e.g. 2026-04-30"),
+    start_date: str | None = Query(None, description="ISO date, e.g. 2026-04-01"),
+    end_date: str | None = Query(None, description="ISO date, e.g. 2026-04-30"),
 ):
     """Filterable system event feed for admins with date range support."""
     stmt = select(Event)

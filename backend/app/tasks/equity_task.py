@@ -1,10 +1,11 @@
 """Equity snapshot Celery task — records balance/equity for all running accounts."""
 
 import asyncio
+
 import structlog
 from celery import shared_task
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
@@ -72,8 +73,12 @@ async def _snapshot_all():
                 for asset in balance:
                     if asset.get("asset") == "USDT":
                         wallet_bal = float(asset.get("walletBalance", 0) or 0)
-                        unrealized = float(asset.get("crossUnPnl", 0) or asset.get("unrealizedProfit", 0) or 0)
-                        margin = float(asset.get("maintMargin", 0) or asset.get("initialMargin", 0) or 0)
+                        unrealized = float(
+                            asset.get("crossUnPnl", 0) or asset.get("unrealizedProfit", 0) or 0
+                        )
+                        margin = float(
+                            asset.get("maintMargin", 0) or asset.get("initialMargin", 0) or 0
+                        )
                         break
 
                 # True equity = wallet balance + unrealized PnL

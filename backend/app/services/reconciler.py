@@ -1,13 +1,15 @@
 """Reconciler — syncs DB state with Binance on worker startup per §5.5."""
 
-import structlog
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from datetime import UTC
 
+import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import decrypt_secret
 from app.models.account import Account
 from app.models.basket import Basket
 from app.services.binance_client import BinanceClient
-from app.core.security import decrypt_secret
 
 logger = structlog.get_logger()
 
@@ -58,36 +60,28 @@ async def reconcile_account(db: AsyncSession, account: Account) -> dict:
                 )
                 basket.status = "CLOSED"
                 basket.exit_reason = "reconciled_no_position"
-                from datetime import datetime, timezone
-                basket.closed_at = datetime.now(timezone.utc)
+                from datetime import datetime
+
+                basket.closed_at = datetime.now(UTC)
 
                 # Try to recover PnL from Binance trade history
                 try:
                     from app.models.order import Order
+
                     order_result = await db.execute(
                         select(Order).where(Order.basket_id == basket.id)
                     )
                     db_orders = order_result.scalars().all()
                     basket_order_ids = {
-                        str(o.binance_order_id) for o in db_orders
-                        if o.binance_order_id
+                        str(o.binance_order_id) for o in db_orders if o.binance_order_id
                     }
 
                     if basket_order_ids:
-                        trades = await client.get_trade_history(
-                            symbol=basket.symbol, limit=100
-                        )
-                        matched = [
-                            t for t in trades
-                            if str(t.get("orderId")) in basket_order_ids
-                        ]
+                        trades = await client.get_trade_history(symbol=basket.symbol, limit=100)
+                        matched = [t for t in trades if str(t.get("orderId")) in basket_order_ids]
                         if matched:
-                            recovered_pnl = sum(
-                                float(t.get("realizedPnl", 0)) for t in matched
-                            )
-                            recovered_fees = sum(
-                                float(t.get("commission", 0)) for t in matched
-                            )
+                            recovered_pnl = sum(float(t.get("realizedPnl", 0)) for t in matched)
+                            recovered_fees = sum(float(t.get("commission", 0)) for t in matched)
                             basket.realized_pnl = recovered_pnl
                             basket.fees_paid = recovered_fees
                             logger.info(
@@ -101,10 +95,8 @@ async def reconcile_account(db: AsyncSession, account: Account) -> dict:
                             # Deduct fee if profitable
                             if recovered_pnl > 0:
                                 from app.services.fee_service import deduct_fee
-                                await deduct_fee(
-                                    db, account.user_id,
-                                    basket.id, recovered_pnl
-                                )
+
+                                await deduct_fee(db, account.user_id, basket.id, recovered_pnl)
                 except Exception as pnl_err:
                     logger.warning(
                         "reconcile_pnl_recovery_failed",

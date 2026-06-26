@@ -1,23 +1,22 @@
 """Admin Market Data API — manage offline data cache for backtesting."""
 
 import logging
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from typing import Optional, List
-
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin, get_db
+from app.api.deps import get_db, require_admin
 from app.models.user import User
 from app.services.market_data_service import (
-    download_full_range,
-    get_cache_status,
-    delete_cache,
-    fix_gaps,
-    VALID_SYMBOLS,
     VALID_KLINE_INTERVALS,
+    VALID_SYMBOLS,
+    delete_cache,
+    download_full_range,
+    fix_gaps,
+    get_cache_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,7 +26,7 @@ router = APIRouter()
 
 class DownloadRequest(BaseModel):
     symbol: str = Field(description="Trading pair: BTCUSDT, ETHUSDT, SOLUSDT")
-    intervals: List[str] = Field(
+    intervals: list[str] = Field(
         default=["5m", "1h"],
         description="Kline intervals to download (1m, 5m, 15m, 1h, 4h, 1d)",
     )
@@ -55,7 +54,7 @@ async def download_market_data(
 ):
     """
     Download historical klines and funding rates from Binance.
-    
+
     This may take a while for large date ranges.
     Data is stored in monthly chunks and can be used for offline backtesting.
     """
@@ -67,19 +66,21 @@ async def download_market_data(
         raise HTTPException(400, f"Invalid intervals: {invalid_intervals}")
 
     # Validate date range
-    start = datetime(request.start_year, request.start_month, 1, tzinfo=timezone.utc)
-    end = datetime(request.end_year, request.end_month, 1, tzinfo=timezone.utc)
+    start = datetime(request.start_year, request.start_month, 1, tzinfo=UTC)
+    end = datetime(request.end_year, request.end_month, 1, tzinfo=UTC)
     if start > end:
         raise HTTPException(400, "Start date must be before end date")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if start > now:
         raise HTTPException(400, "Start date is in the future")
 
     # Cap at 5 years of history
     max_start = now.replace(year=now.year - 5)
     if start < max_start:
-        raise HTTPException(400, f"Maximum history is 5 years (earliest: {max_start.strftime('%Y-%m')})")
+        raise HTTPException(
+            400, f"Maximum history is 5 years (earliest: {max_start.strftime('%Y-%m')})"
+        )
 
     try:
         all_results = []
@@ -104,14 +105,14 @@ async def download_market_data(
         }
     except Exception as e:
         logger.error(f"Market data download failed: {e}", exc_info=True)
-        raise HTTPException(500, f"Download failed: {str(e)}")
+        raise HTTPException(500, f"Download failed: {str(e)}") from e
 
 
 @router.delete("/market-data")
 async def clear_market_data(
-    symbol: Optional[str] = Query(None),
-    data_type: Optional[str] = Query(None),
-    interval: Optional[str] = Query(None),
+    symbol: str | None = Query(None),
+    data_type: str | None = Query(None),
+    interval: str | None = Query(None),
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -146,6 +147,7 @@ async def trigger_update(
 ):
     """Manually trigger a market data auto-update (runs in background)."""
     import asyncio
+
     from app.tasks.market_data_task import _auto_update_market_data
 
     def _run_update():
@@ -161,7 +163,7 @@ async def trigger_update(
 
 @router.post("/market-data/fix-gaps")
 async def fix_data_gaps(
-    symbol: Optional[str] = Query(None),
+    symbol: str | None = Query(None),
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -171,5 +173,4 @@ async def fix_data_gaps(
         return result
     except Exception as e:
         logger.error(f"Fix gaps failed: {e}", exc_info=True)
-        raise HTTPException(500, f"Fix gaps failed: {str(e)}")
-
+        raise HTTPException(500, f"Fix gaps failed: {str(e)}") from e

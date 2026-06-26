@@ -1,49 +1,52 @@
 """Authentication endpoints per §7 and §9."""
 
-from datetime import datetime, timedelta, timezone
-import uuid
 import secrets
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
+import uuid
+from datetime import UTC, datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
 
 from app.api.deps import get_db
 from app.core.config import settings
+from app.core.email import generate_otp, send_password_reset_email, send_verification_email
+from app.core.enums import AuditAction
+from app.core.rate_limit import (
+    forgot_password_limiter,
+    get_client_ip,
+    login_limiter_email,
+    login_limiter_ip,
+    register_limiter_ip,
+    resend_verification_limiter,
+)
 from app.core.security import (
-    verify_password,
-    get_password_hash,
     create_access_token,
     create_refresh_token,
+    get_password_hash,
     validate_password_strength,
+    verify_password,
 )
-from app.core.email import send_verification_email, send_password_reset_email, generate_otp
-from app.core.rate_limit import (
-    login_limiter_ip, login_limiter_email,
-    register_limiter_ip, forgot_password_limiter,
-    resend_verification_limiter, get_client_ip,
-)
-from app.models.user import User
 from app.models.session import Session
-from app.services.audit_service import record_audit
-from app.core.enums import AuditAction
+from app.models.user import User
 from app.schemas.auth import (
-    RegisterRequest,
-    LoginRequest,
-    Token,
-    RefreshTokenRequest,
     ForgotPasswordRequest,
-    ResetPasswordRequest,
-    VerifyEmailRequest,
+    LoginRequest,
+    RegisterRequest,
     ResendVerificationRequest,
+    ResetPasswordRequest,
+    Token,
+    VerifyEmailRequest,
 )
 from app.schemas.user import UserResponse
+from app.services.audit_service import record_audit
 
 router = APIRouter()
 
 
 def _clear_auth_cookies(response: Response):
     """Clear all auth cookies with matching attributes.
-    
+
     delete_cookie must match the same path/samesite/secure/httponly attrs
     that were used when the cookie was set, otherwise the browser won't
     actually remove them — leaving stale tokens that cause infinite redirect loops.
@@ -88,30 +91,28 @@ async def register(request: Request, payload: RegisterRequest, db: AsyncSession 
         is_active=True,
         is_email_verified=False,
         invite_code=new_invite_code,
-        invited_by_id=inviting_user.id
+        invited_by_id=inviting_user.id,
     )
 
     # Generate 6-digit OTP
     otp = generate_otp()
     user.email_verification_token_hash = get_password_hash(otp)
-    user.email_verification_expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+    user.email_verification_expires_at = datetime.now(UTC) + timedelta(minutes=30)
 
     db.add(user)
     await db.flush()
 
     # Auto-provision personal workspace
+    from app.core.enums import WorkspaceRole
     from app.models.workspace import Workspace
     from app.models.workspace_member import WorkspaceMember
-    from app.core.enums import WorkspaceRole
 
     default_workspace = Workspace(name="Personal Workspace", owner_id=user.id)
     db.add(default_workspace)
     await db.flush()
 
     member = WorkspaceMember(
-        workspace_id=default_workspace.id,
-        user_id=user.id,
-        role=WorkspaceRole.OWNER
+        workspace_id=default_workspace.id, user_id=user.id, role=WorkspaceRole.OWNER
     )
     db.add(member)
 
@@ -119,9 +120,12 @@ async def register(request: Request, payload: RegisterRequest, db: AsyncSession 
     await db.refresh(user)
 
     await record_audit(
-        db, action=AuditAction.USER_REGISTERED,
-        actor_user_id=user.id, target_user_id=user.id,
-        ip_address=client_ip, user_agent=request.headers.get("user-agent"),
+        db,
+        action=AuditAction.USER_REGISTERED,
+        actor_user_id=user.id,
+        target_user_id=user.id,
+        ip_address=client_ip,
+        user_agent=request.headers.get("user-agent"),
     )
     await db.commit()
 
@@ -132,18 +136,27 @@ async def register(request: Request, payload: RegisterRequest, db: AsyncSession 
         pass
 
     return UserResponse(
-        id=user.id, email=user.email, display_name=user.display_name,
-        role=user.role, is_active=user.is_active,
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        role=user.role,
+        is_active=user.is_active,
         is_email_verified=user.is_email_verified,
         totp_enabled=user.totp_secret_encrypted is not None,
         invite_code=user.invite_code,
-        created_at=user.created_at, updated_at=user.updated_at,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
         last_login_at=user.last_login_at,
     )
 
 
 @router.post("/verify-email")
-async def verify_email(request: Request, response: Response, payload: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
+async def verify_email(
+    request: Request,
+    response: Response,
+    payload: VerifyEmailRequest,
+    db: AsyncSession = Depends(get_db),
+):
     """Verify email using 6-digit OTP code. Auto-logs user in on success."""
     result = await db.execute(
         select(User).where(User.email == payload.email, User.deleted_at == None)
@@ -159,8 +172,12 @@ async def verify_email(request: Request, response: Response, payload: VerifyEmai
     if not user.email_verification_token_hash:
         raise HTTPException(status_code=400, detail="No pending verification")
 
-    if user.email_verification_expires_at and user.email_verification_expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="Verification code has expired. Please request a new one.")
+    if user.email_verification_expires_at and user.email_verification_expires_at < datetime.now(
+        UTC
+    ):
+        raise HTTPException(
+            status_code=400, detail="Verification code has expired. Please request a new one."
+        )
 
     if not verify_password(payload.otp, user.email_verification_token_hash):
         raise HTTPException(status_code=400, detail="Invalid verification code")
@@ -170,15 +187,17 @@ async def verify_email(request: Request, response: Response, payload: VerifyEmai
     user.email_verification_expires_at = None
 
     await record_audit(
-        db, action=AuditAction.USER_VERIFIED,
-        actor_user_id=user.id, target_user_id=user.id,
+        db,
+        action=AuditAction.USER_VERIFIED,
+        actor_user_id=user.id,
+        target_user_id=user.id,
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
     # Auto-login: create session and set cookies
     client_ip = get_client_ip(request)
-    user.last_login_at = datetime.now(timezone.utc)
+    user.last_login_at = datetime.now(UTC)
     user.last_login_ip = client_ip
 
     access_token = create_access_token(subject=user.id)
@@ -190,7 +209,7 @@ async def verify_email(request: Request, response: Response, payload: VerifyEmai
         refresh_token_hash=refresh_hash,
         ip_address=client_ip,
         user_agent=request.headers.get("user-agent"),
-        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.JWT_REFRESH_TTL_DAYS)
+        expires_at=datetime.now(UTC) + timedelta(days=settings.JWT_REFRESH_TTL_DAYS),
     )
     db.add(session)
     await db.commit()
@@ -200,16 +219,31 @@ async def verify_email(request: Request, response: Response, payload: VerifyEmai
     refresh_max_age = settings.JWT_REFRESH_TTL_DAYS * 24 * 60 * 60
 
     response.set_cookie(
-        key="access_token", value=access_token, httponly=True, secure=secure_cookie,
-        samesite="strict", max_age=access_max_age, path="/"
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="strict",
+        max_age=access_max_age,
+        path="/",
     )
     response.set_cookie(
-        key="refresh_token", value=refresh_token, httponly=True, secure=secure_cookie,
-        samesite="strict", max_age=refresh_max_age, path="/"
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="strict",
+        max_age=refresh_max_age,
+        path="/",
     )
     response.set_cookie(
-        key="remember_me", value="1", httponly=True, secure=secure_cookie,
-        samesite="strict", max_age=refresh_max_age, path="/"
+        key="remember_me",
+        value="1",
+        httponly=True,
+        secure=secure_cookie,
+        samesite="strict",
+        max_age=refresh_max_age,
+        path="/",
     )
 
     return {"detail": "Email verified successfully"}
@@ -233,7 +267,7 @@ async def resend_verification(
 
     otp = generate_otp()
     user.email_verification_token_hash = get_password_hash(otp)
-    user.email_verification_expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+    user.email_verification_expires_at = datetime.now(UTC) + timedelta(minutes=30)
     await db.commit()
 
     try:
@@ -245,58 +279,76 @@ async def resend_verification(
 
 
 @router.post("/login", response_model=Token)
-async def login(request: Request, response: Response, payload: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(
+    request: Request, response: Response, payload: LoginRequest, db: AsyncSession = Depends(get_db)
+):
     """Authenticate user and return JWT tokens."""
     client_ip = get_client_ip(request)
     await login_limiter_ip.check_or_raise(client_ip)
     await login_limiter_email.check_or_raise(payload.email)
 
-    result = await db.execute(select(User).where(User.email == payload.email, User.deleted_at == None))
+    result = await db.execute(
+        select(User).where(User.email == payload.email, User.deleted_at == None)
+    )
     user = result.scalars().first()
 
-    if user and user.locked_until and user.locked_until > datetime.now(timezone.utc):
+    if user and user.locked_until and user.locked_until > datetime.now(UTC):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is temporarily locked due to multiple failed login attempts. Please try again later."
+            detail="Account is temporarily locked due to multiple failed login attempts. Please try again later.",
         )
 
     if not user or not verify_password(payload.password, user.password_hash):
         if user:
             user.failed_login_count += 1
             if user.failed_login_count >= 5:
-                user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=15)
-                
+                user.locked_until = datetime.now(UTC) + timedelta(minutes=15)
+
             await record_audit(
-                db, action=AuditAction.LOGIN_FAILED,
-                actor_user_id=user.id, target_user_id=user.id,
+                db,
+                action=AuditAction.LOGIN_FAILED,
+                actor_user_id=user.id,
+                target_user_id=user.id,
                 ip_address=client_ip,
                 user_agent=request.headers.get("user-agent"),
                 payload={"reason": "bad_credentials", "failed_attempts": user.failed_login_count},
             )
             await db.commit()
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password"
+        )
 
     if not user.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account is inactive")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="User account is inactive"
+        )
 
     if user.suspended_at:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is suspended")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="User account is suspended"
+        )
 
     # TOTP check
     if user.totp_secret_encrypted:
         if not payload.totp_code:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="TOTP code required")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="TOTP code required"
+            )
         import pyotp
+
         from app.core.security import decrypt_totp_secret
+
         secret = decrypt_totp_secret(user.totp_secret_encrypted)
         totp = pyotp.TOTP(secret)
         if not totp.verify(payload.totp_code):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code"
+            )
 
     # Reset failed login count
     user.failed_login_count = 0
     user.locked_until = None
-    user.last_login_at = datetime.now(timezone.utc)
+    user.last_login_at = datetime.now(UTC)
     user.last_login_ip = client_ip
 
     # Generate tokens
@@ -306,24 +358,25 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
 
     # Enforce max 10 sessions — revoke oldest if exceeded
     result = await db.execute(
-        select(Session).where(
-            Session.user_id == user.id, Session.revoked_at == None
-        ).order_by(Session.created_at.asc())
+        select(Session)
+        .where(Session.user_id == user.id, Session.revoked_at == None)
+        .order_by(Session.created_at.asc())
     )
     active_sessions = result.scalars().all()
     if len(active_sessions) >= 10:
         oldest = active_sessions[0]
-        oldest.revoked_at = datetime.now(timezone.utc)
+        oldest.revoked_at = datetime.now(UTC)
         oldest.revoked_reason = "Max sessions exceeded"
 
     # Check if this is a new IP BEFORE creating the session
     # Cast INET to text and strip CIDR suffix (/32) for proper comparison
-    from sqlalchemy import cast, String as SAString
+    from sqlalchemy import String as SAString
+    from sqlalchemy import cast
+
     ip_result = await db.execute(
-        select(cast(Session.ip_address, SAString)).where(
-            Session.user_id == user.id,
-            Session.ip_address != None
-        ).distinct()
+        select(cast(Session.ip_address, SAString))
+        .where(Session.user_id == user.id, Session.ip_address != None)
+        .distinct()
     )
     known_ips = {row[0].split("/")[0] for row in ip_result.all()}
     is_new_ip = client_ip not in known_ips
@@ -333,14 +386,17 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
         refresh_token_hash=refresh_hash,
         ip_address=client_ip,
         user_agent=request.headers.get("user-agent"),
-        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.JWT_REFRESH_TTL_DAYS)
+        expires_at=datetime.now(UTC) + timedelta(days=settings.JWT_REFRESH_TTL_DAYS),
     )
     db.add(session)
 
     await record_audit(
-        db, action=AuditAction.LOGIN_SUCCESS,
-        actor_user_id=user.id, target_user_id=user.id,
-        ip_address=client_ip, user_agent=request.headers.get("user-agent"),
+        db,
+        action=AuditAction.LOGIN_SUCCESS,
+        actor_user_id=user.id,
+        target_user_id=user.id,
+        ip_address=client_ip,
+        user_agent=request.headers.get("user-agent"),
         emit_event=False,  # Don't spam event feed with every login
     )
     await db.commit()
@@ -349,10 +405,12 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
     if is_new_ip:
         try:
             from app.services.notification_service import notification_service
+
             await notification_service.notify_login(
-                user.email, client_ip,
+                user.email,
+                client_ip,
                 request.headers.get("user-agent", "Unknown"),
-                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
             )
         except Exception:
             pass
@@ -365,28 +423,50 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
     if payload.remember_me:
         # Persistent cookies — survive browser close
         response.set_cookie(
-            key="access_token", value=access_token, httponly=True, secure=secure_cookie,
-            samesite="strict", max_age=access_max_age, path="/"
+            key="access_token",
+            value=access_token,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            max_age=access_max_age,
+            path="/",
         )
         response.set_cookie(
-            key="refresh_token", value=refresh_token, httponly=True, secure=secure_cookie,
-            samesite="strict", max_age=refresh_max_age, path="/"
+            key="refresh_token",
+            value=refresh_token,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            max_age=refresh_max_age,
+            path="/",
         )
     else:
         # Session cookies — deleted when browser closes (no max_age)
         response.set_cookie(
-            key="access_token", value=access_token, httponly=True, secure=secure_cookie,
-            samesite="strict", path="/"
+            key="access_token",
+            value=access_token,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            path="/",
         )
         response.set_cookie(
-            key="refresh_token", value=refresh_token, httponly=True, secure=secure_cookie,
-            samesite="strict", path="/"
+            key="refresh_token",
+            value=refresh_token,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            path="/",
         )
     # Store remember_me preference — always persistent so refresh endpoint can read it
     response.set_cookie(
-        key="remember_me", value="1" if payload.remember_me else "0",
-        httponly=True, secure=secure_cookie, samesite="strict",
-        max_age=refresh_max_age, path="/"
+        key="remember_me",
+        value="1" if payload.remember_me else "0",
+        httponly=True,
+        secure=secure_cookie,
+        samesite="strict",
+        max_age=refresh_max_age,
+        path="/",
     )
 
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
@@ -396,7 +476,7 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
 async def refresh_token(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     """Rotate refresh token and issue new access token."""
     from app.core.security import verify_token
-    
+
     # Get token from cookie (primary) or request body (legacy)
     token_to_refresh = request.cookies.get("refresh_token")
     if not token_to_refresh:
@@ -408,7 +488,7 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
     if not token_to_refresh:
         _clear_auth_cookies(response)
         raise HTTPException(status_code=401, detail="Refresh token missing")
-        
+
     token_payload = verify_token(token_to_refresh, "refresh")
 
     if not token_payload:
@@ -421,7 +501,7 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
         select(Session).where(
             Session.user_id == uuid.UUID(user_id),
             Session.revoked_at == None,
-            Session.expires_at > datetime.now(timezone.utc)
+            Session.expires_at > datetime.now(UTC),
         )
     )
     sessions = result.scalars().all()
@@ -440,7 +520,7 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
     new_refresh_token = create_refresh_token(subject=user_id)
 
     valid_session.refresh_token_hash = get_password_hash(new_refresh_token)
-    valid_session.expires_at = datetime.now(timezone.utc) + timedelta(days=settings.JWT_REFRESH_TTL_DAYS)
+    valid_session.expires_at = datetime.now(UTC) + timedelta(days=settings.JWT_REFRESH_TTL_DAYS)
     valid_session.ip_address = get_client_ip(request)
 
     await db.commit()
@@ -453,31 +533,53 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
 
     if remember_me:
         response.set_cookie(
-            key="access_token", value=access_token, httponly=True, secure=secure_cookie,
-            samesite="strict", max_age=access_max_age, path="/"
+            key="access_token",
+            value=access_token,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            max_age=access_max_age,
+            path="/",
         )
         response.set_cookie(
-            key="refresh_token", value=new_refresh_token, httponly=True, secure=secure_cookie,
-            samesite="strict", max_age=refresh_max_age, path="/"
+            key="refresh_token",
+            value=new_refresh_token,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            max_age=refresh_max_age,
+            path="/",
         )
     else:
         response.set_cookie(
-            key="access_token", value=access_token, httponly=True, secure=secure_cookie,
-            samesite="strict", path="/"
+            key="access_token",
+            value=access_token,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            path="/",
         )
         response.set_cookie(
-            key="refresh_token", value=new_refresh_token, httponly=True, secure=secure_cookie,
-            samesite="strict", path="/"
+            key="refresh_token",
+            value=new_refresh_token,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            path="/",
         )
 
-    return {"access_token": access_token, "refresh_token": new_refresh_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+    }
 
 
 @router.post("/logout")
 async def logout(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     """Revoke the current session and clear cookies."""
     from app.core.security import verify_token
-    
+
     # Get token from cookie (primary) or request body (legacy)
     token_to_revoke = request.cookies.get("refresh_token")
     if not token_to_revoke:
@@ -489,7 +591,7 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
     if not token_to_revoke:
         _clear_auth_cookies(response)
         return {"detail": "Logged out"}
-        
+
     token_payload = verify_token(token_to_revoke, "refresh")
     if not token_payload:
         _clear_auth_cookies(response)
@@ -502,39 +604,47 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
     sessions = result.scalars().all()
     for s in sessions:
         if verify_password(token_to_revoke, s.refresh_token_hash):
-            s.revoked_at = datetime.now(timezone.utc)
+            s.revoked_at = datetime.now(UTC)
             s.revoked_reason = "User logged out"
             await record_audit(
-                db, action=AuditAction.LOGOUT,
-                actor_user_id=uuid.UUID(user_id), target_user_id=uuid.UUID(user_id),
+                db,
+                action=AuditAction.LOGOUT,
+                actor_user_id=uuid.UUID(user_id),
+                target_user_id=uuid.UUID(user_id),
                 ip_address=get_client_ip(request),
                 emit_event=False,
             )
             break
 
     await db.commit()
-    
+
     _clear_auth_cookies(response)
     return {"detail": "Logged out"}
 
 
 @router.post("/forgot-password")
-async def forgot_password(request: Request, payload: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+async def forgot_password(
+    request: Request, payload: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)
+):
     """Request password reset email."""
     await forgot_password_limiter.check_or_raise(payload.email)
 
-    result = await db.execute(select(User).where(User.email == payload.email, User.deleted_at == None))
+    result = await db.execute(
+        select(User).where(User.email == payload.email, User.deleted_at == None)
+    )
     user = result.scalars().first()
 
     # Always return success to prevent email enumeration
     if user:
         otp = generate_otp()
         user.password_reset_token_hash = get_password_hash(otp)
-        user.password_reset_expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+        user.password_reset_expires_at = datetime.now(UTC) + timedelta(minutes=30)
 
         await record_audit(
-            db, action=AuditAction.PASSWORD_RESET_REQUESTED,
-            actor_user_id=user.id, target_user_id=user.id,
+            db,
+            action=AuditAction.PASSWORD_RESET_REQUESTED,
+            actor_user_id=user.id,
+            target_user_id=user.id,
             ip_address=get_client_ip(request),
         )
         await db.commit()
@@ -548,7 +658,9 @@ async def forgot_password(request: Request, payload: ForgotPasswordRequest, db: 
 
 
 @router.post("/reset-password")
-async def reset_password(request: Request, payload: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+async def reset_password(
+    request: Request, payload: ResetPasswordRequest, db: AsyncSession = Depends(get_db)
+):
     """Complete password reset with token."""
     # Find user by email
     result = await db.execute(
@@ -559,7 +671,7 @@ async def reset_password(request: Request, payload: ResetPasswordRequest, db: As
     if not user or not user.password_reset_token_hash:
         raise HTTPException(status_code=400, detail="Invalid reset request")
 
-    if user.password_reset_expires_at and user.password_reset_expires_at < datetime.now(timezone.utc):
+    if user.password_reset_expires_at and user.password_reset_expires_at < datetime.now(UTC):
         raise HTTPException(status_code=400, detail="Reset token has expired")
 
     if not verify_password(payload.otp, user.password_reset_token_hash):
@@ -569,7 +681,9 @@ async def reset_password(request: Request, payload: ResetPasswordRequest, db: As
 
     # Reject same password
     if verify_password(payload.new_password, user.password_hash):
-        raise HTTPException(status_code=400, detail="New password must be different from current password")
+        raise HTTPException(
+            status_code=400, detail="New password must be different from current password"
+        )
 
     user.password_hash = get_password_hash(payload.new_password)
     user.password_reset_token_hash = None
@@ -580,12 +694,14 @@ async def reset_password(request: Request, payload: ResetPasswordRequest, db: As
         select(Session).where(Session.user_id == user.id, Session.revoked_at == None)
     )
     for s in result.scalars().all():
-        s.revoked_at = datetime.now(timezone.utc)
+        s.revoked_at = datetime.now(UTC)
         s.revoked_reason = "Password reset"
 
     await record_audit(
-        db, action=AuditAction.PASSWORD_RESET_COMPLETED,
-        actor_user_id=user.id, target_user_id=user.id,
+        db,
+        action=AuditAction.PASSWORD_RESET_COMPLETED,
+        actor_user_id=user.id,
+        target_user_id=user.id,
         ip_address=get_client_ip(request),
     )
     await db.commit()

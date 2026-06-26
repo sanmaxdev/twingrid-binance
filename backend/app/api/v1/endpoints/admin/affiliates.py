@@ -1,16 +1,17 @@
 """Admin affiliate management endpoints."""
+
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 from pydantic import BaseModel
-from typing import Optional
-from datetime import datetime, timezone
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require_admin
-from app.models.user import User
-from app.models.platform_settings import PlatformSettings
 from app.models.affiliate_commission import AffiliateCommission
 from app.models.affiliate_withdrawal import AffiliateWithdrawal
+from app.models.platform_settings import PlatformSettings
+from app.models.user import User
 
 router = APIRouter()
 
@@ -21,13 +22,13 @@ class AffiliateConfigUpdate(BaseModel):
 
 
 class UserOverrideUpdate(BaseModel):
-    commission_pct: Optional[float] = None
+    commission_pct: float | None = None
 
 
 class WithdrawalAction(BaseModel):
-    tx_hash: Optional[str] = None
-    reject_reason: Optional[str] = None
-    admin_note: Optional[str] = None
+    tx_hash: str | None = None
+    reject_reason: str | None = None
+    admin_note: str | None = None
 
 
 @router.get("/config")
@@ -74,9 +75,7 @@ async def get_overview(
     )
     total_paid = float(total_q.scalar() or 0)
 
-    active_q = await db.execute(
-        select(func.count(func.distinct(AffiliateCommission.referrer_id)))
-    )
+    active_q = await db.execute(select(func.count(func.distinct(AffiliateCommission.referrer_id))))
     active_affiliates = active_q.scalar() or 0
 
     ref_q = await db.execute(
@@ -84,7 +83,7 @@ async def get_overview(
     )
     total_referrals = ref_q.scalar() or 0
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_q = await db.execute(
         select(func.coalesce(func.sum(AffiliateCommission.commission_amount), 0)).where(
@@ -122,12 +121,17 @@ async def get_overview(
 
 @router.get("/users")
 async def get_affiliate_users(
-    skip: int = 0, limit: int = 100,
+    skip: int = 0,
+    limit: int = 100,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(User).where(User.deleted_at == None).order_by(User.created_at.desc()).offset(skip).limit(limit)
+        select(User)
+        .where(User.deleted_at == None)
+        .order_by(User.created_at.desc())
+        .offset(skip)
+        .limit(limit)
     )
     users = result.scalars().all()
 
@@ -145,16 +149,20 @@ async def get_affiliate_users(
         )
         total_earned = float(earned_q.scalar() or 0)
 
-        items.append({
-            "id": str(u.id),
-            "email": u.email,
-            "display_name": u.display_name,
-            "referral_count": referral_count,
-            "total_earned": round(total_earned, 4),
-            "affiliate_balance": round(float(u.affiliate_balance), 4),
-            "commission_override": float(u.affiliate_commission_override) if u.affiliate_commission_override is not None else None,
-            "invite_code": u.invite_code,
-        })
+        items.append(
+            {
+                "id": str(u.id),
+                "email": u.email,
+                "display_name": u.display_name,
+                "referral_count": referral_count,
+                "total_earned": round(total_earned, 4),
+                "affiliate_balance": round(float(u.affiliate_balance), 4),
+                "commission_override": float(u.affiliate_commission_override)
+                if u.affiliate_commission_override is not None
+                else None,
+                "invite_code": u.invite_code,
+            }
+        )
 
     return {"items": items}
 
@@ -167,6 +175,7 @@ async def set_user_override(
     db: AsyncSession = Depends(get_db),
 ):
     import uuid as uuid_mod
+
     result = await db.execute(select(User).where(User.id == uuid_mod.UUID(user_id)))
     user = result.scalar_one_or_none()
     if not user:
@@ -178,9 +187,10 @@ async def set_user_override(
 
 # ── Withdrawal Management ──
 
+
 @router.get("/withdrawals")
 async def list_withdrawals(
-    status: Optional[str] = None,
+    status: str | None = None,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -195,7 +205,9 @@ async def list_withdrawals(
     user_map = {}
     if user_ids:
         users_r = await db.execute(select(User).where(User.id.in_(user_ids)))
-        user_map = {u.id: {"email": u.email, "name": u.display_name} for u in users_r.scalars().all()}
+        user_map = {
+            u.id: {"email": u.email, "name": u.display_name} for u in users_r.scalars().all()
+        }
 
     return {
         "items": [
@@ -227,6 +239,7 @@ async def approve_withdrawal(
     db: AsyncSession = Depends(get_db),
 ):
     import uuid as uuid_mod
+
     result = await db.execute(
         select(AffiliateWithdrawal).where(AffiliateWithdrawal.id == uuid_mod.UUID(withdrawal_id))
     )
@@ -238,7 +251,7 @@ async def approve_withdrawal(
 
     wd.status = "APPROVED"
     wd.reviewed_by = admin.id
-    wd.reviewed_at = datetime.now(timezone.utc)
+    wd.reviewed_at = datetime.now(UTC)
     wd.tx_hash = payload.tx_hash
     wd.admin_note = payload.admin_note
     await db.commit()
@@ -253,6 +266,7 @@ async def reject_withdrawal(
     db: AsyncSession = Depends(get_db),
 ):
     import uuid as uuid_mod
+
     result = await db.execute(
         select(AffiliateWithdrawal).where(AffiliateWithdrawal.id == uuid_mod.UUID(withdrawal_id))
     )
@@ -270,9 +284,8 @@ async def reject_withdrawal(
 
     wd.status = "REJECTED"
     wd.reviewed_by = admin.id
-    wd.reviewed_at = datetime.now(timezone.utc)
+    wd.reviewed_at = datetime.now(UTC)
     wd.reject_reason = payload.reject_reason or "Rejected by admin"
     wd.admin_note = payload.admin_note
     await db.commit()
     return {"detail": f"Withdrawal rejected — ${float(wd.amount):.2f} refunded to affiliate wallet"}
-

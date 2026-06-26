@@ -1,17 +1,19 @@
 """User-facing affiliate endpoints."""
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from pydantic import BaseModel
-from typing import Optional
 
-from app.api.deps import get_db, get_current_user
-from app.models.user import User
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db
+from app.core.config import settings
+from app.core.enums import FeeTransactionType
 from app.models.affiliate_commission import AffiliateCommission
 from app.models.affiliate_withdrawal import AffiliateWithdrawal
 from app.models.fee_transaction import FeeTransaction
-from app.core.enums import FeeTransactionType
+from app.models.user import User
 
 router = APIRouter()
 
@@ -47,7 +49,7 @@ async def get_affiliate_stats(
     )
     total_earned = float(total_q.scalar() or 0)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_q = await db.execute(
         select(func.coalesce(func.sum(AffiliateCommission.commission_amount), 0)).where(
@@ -83,22 +85,25 @@ async def get_affiliate_stats(
         "total_withdrawn": round(total_withdrawn, 4),
         "pending_withdrawal": round(pending_withdrawal, 4),
         "invite_code": current_user.invite_code,
-        "referral_link": f"https://twingridbot.com/auth/register?ref={current_user.invite_code}",
+        "referral_link": f"{settings.APP_PUBLIC_URL.rstrip('/')}/auth/register?ref={current_user.invite_code}",
         "min_withdrawal": MIN_WITHDRAWAL,
     }
 
 
 @router.get("/referrals")
 async def get_referrals(
-    skip: int = 0, limit: int = 50,
+    skip: int = 0,
+    limit: int = 50,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get list of referred users with commission earned from each."""
     result = await db.execute(
-        select(User.id, User.display_name, User.email, User.created_at).where(
-            User.invited_by_id == current_user.id, User.deleted_at == None
-        ).order_by(User.created_at.desc()).offset(skip).limit(limit)
+        select(User.id, User.display_name, User.email, User.created_at)
+        .where(User.invited_by_id == current_user.id, User.deleted_at == None)
+        .order_by(User.created_at.desc())
+        .offset(skip)
+        .limit(limit)
     )
     referrals = result.all()
 
@@ -111,29 +116,33 @@ async def get_referrals(
             )
         )
         earned = float(earned_q.scalar() or 0)
-        items.append({
-            "id": str(r.id),
-            "display_name": r.display_name or r.email.split("@")[0],
-            "email": r.email[:3] + "***@" + r.email.split("@")[1],
-            "joined_at": r.created_at.isoformat(),
-            "commission_earned": round(earned, 4),
-        })
+        items.append(
+            {
+                "id": str(r.id),
+                "display_name": r.display_name or r.email.split("@")[0],
+                "email": r.email[:3] + "***@" + r.email.split("@")[1],
+                "joined_at": r.created_at.isoformat(),
+                "commission_earned": round(earned, 4),
+            }
+        )
 
     return {"items": items, "total": len(items)}
 
 
 @router.get("/transactions")
 async def get_transactions(
-    skip: int = 0, limit: int = 50,
+    skip: int = 0,
+    limit: int = 50,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get unified transaction history — commissions + withdrawals."""
     # Commissions
     comm_result = await db.execute(
-        select(AffiliateCommission).where(
-            AffiliateCommission.referrer_id == current_user.id
-        ).order_by(AffiliateCommission.created_at.desc()).limit(200)
+        select(AffiliateCommission)
+        .where(AffiliateCommission.referrer_id == current_user.id)
+        .order_by(AffiliateCommission.created_at.desc())
+        .limit(200)
     )
     commissions = comm_result.scalars().all()
 
@@ -149,23 +158,26 @@ async def get_transactions(
 
     # Withdrawals
     wd_result = await db.execute(
-        select(AffiliateWithdrawal).where(
-            AffiliateWithdrawal.user_id == current_user.id
-        ).order_by(AffiliateWithdrawal.created_at.desc()).limit(200)
+        select(AffiliateWithdrawal)
+        .where(AffiliateWithdrawal.user_id == current_user.id)
+        .order_by(AffiliateWithdrawal.created_at.desc())
+        .limit(200)
     )
     withdrawals = wd_result.scalars().all()
 
     # Merge into unified list
     items = []
     for c in commissions:
-        items.append({
-            "id": str(c.id),
-            "type": "COMMISSION",
-            "amount": round(float(c.commission_amount), 4),
-            "description": f"{float(c.commission_pct):.2f}% on ${float(c.fee_amount):.2f} fee from {names.get(c.referral_id, 'referral')}",
-            "status": "COMPLETED",
-            "created_at": c.created_at.isoformat(),
-        })
+        items.append(
+            {
+                "id": str(c.id),
+                "type": "COMMISSION",
+                "amount": round(float(c.commission_amount), 4),
+                "description": f"{float(c.commission_pct):.2f}% on ${float(c.fee_amount):.2f} fee from {names.get(c.referral_id, 'referral')}",
+                "status": "COMPLETED",
+                "created_at": c.created_at.isoformat(),
+            }
+        )
     for w in withdrawals:
         if w.method == "TWIN_GRID_WALLET":
             description = "Transferred to Twin Grid Wallet"
@@ -174,20 +186,22 @@ async def get_transactions(
             addr = w.wallet_address
             description = f"{w.method} \u2192 {addr[:8]}...{addr[-4:] if len(addr) > 12 else addr}"
             tx_type = "WITHDRAWAL"
-        items.append({
-            "id": str(w.id),
-            "type": tx_type,
-            "method": w.method,
-            "amount": -round(float(w.amount), 4),
-            "description": description,
-            "status": w.status,
-            "reject_reason": w.reject_reason,
-            "created_at": w.created_at.isoformat(),
-        })
+        items.append(
+            {
+                "id": str(w.id),
+                "type": tx_type,
+                "method": w.method,
+                "amount": -round(float(w.amount), 4),
+                "description": description,
+                "status": w.status,
+                "reject_reason": w.reject_reason,
+                "created_at": w.created_at.isoformat(),
+            }
+        )
 
     # Sort by date desc
     items.sort(key=lambda x: x["created_at"], reverse=True)
-    return {"items": items[skip:skip + limit]}
+    return {"items": items[skip : skip + limit]}
 
 
 @router.post("/withdraw")
@@ -216,7 +230,9 @@ async def request_withdrawal(
 
     balance = float(current_user.affiliate_balance)
     if payload.amount > balance:
-        raise HTTPException(status_code=400, detail=f"Insufficient balance. Available: ${balance:.2f}")
+        raise HTTPException(
+            status_code=400, detail=f"Insufficient balance. Available: ${balance:.2f}"
+        )
 
     # Deduct from affiliate balance
     current_user.affiliate_balance = float(balance - payload.amount)
@@ -235,15 +251,18 @@ async def request_withdrawal(
 
 @router.get("/withdrawals")
 async def get_withdrawals(
-    skip: int = 0, limit: int = 50,
+    skip: int = 0,
+    limit: int = 50,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get withdrawal history."""
     result = await db.execute(
-        select(AffiliateWithdrawal).where(
-            AffiliateWithdrawal.user_id == current_user.id
-        ).order_by(AffiliateWithdrawal.created_at.desc()).offset(skip).limit(limit)
+        select(AffiliateWithdrawal)
+        .where(AffiliateWithdrawal.user_id == current_user.id)
+        .order_by(AffiliateWithdrawal.created_at.desc())
+        .offset(skip)
+        .limit(limit)
     )
     withdrawals = result.scalars().all()
     return {
@@ -278,15 +297,14 @@ async def transfer_to_twin_grid_wallet(
     """
     if payload.amount < MIN_TRANSFER:
         raise HTTPException(
-            status_code=400,
-            detail=f"Minimum transfer amount is ${MIN_TRANSFER:.2f}"
+            status_code=400, detail=f"Minimum transfer amount is ${MIN_TRANSFER:.2f}"
         )
 
     affiliate_balance = float(current_user.affiliate_balance)
     if payload.amount > affiliate_balance:
         raise HTTPException(
             status_code=400,
-            detail=f"Insufficient affiliate balance. Available: ${affiliate_balance:.2f}"
+            detail=f"Insufficient affiliate balance. Available: ${affiliate_balance:.2f}",
         )
 
     amount = round(payload.amount, 8)
@@ -313,7 +331,7 @@ async def transfer_to_twin_grid_wallet(
         amount=amount,  # positive = credit
         balance_before=twin_grid_balance_before,
         balance_after=float(current_user.twin_grid_balance),
-        note=f"Transferred from Affiliate Wallet",
+        note="Transferred from Affiliate Wallet",
     )
     db.add(fee_tx)
 

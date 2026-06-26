@@ -1,20 +1,23 @@
 """Pydantic schemas for fee/wallet API request and response models."""
 
-from datetime import datetime
-from typing import Optional
 from pydantic import BaseModel, Field
-from uuid import UUID
-
 
 # ── Request schemas ──
 
+
 class DepositSubmitRequest(BaseModel):
     amount: float = Field(..., gt=0, description="Deposit amount in USDT")
-    tx_hash: str = Field(..., min_length=64, max_length=66, pattern=r'^(0x)?[a-fA-F0-9]{64}$', description="Transaction hash")
+    tx_hash: str = Field(
+        ...,
+        min_length=64,
+        max_length=66,
+        pattern=r"^(0x)?[a-fA-F0-9]{64}$",
+        description="Transaction hash",
+    )
 
 
 class DepositReviewRequest(BaseModel):
-    reject_reason: Optional[str] = Field(None, max_length=500)
+    reject_reason: str | None = Field(None, max_length=500)
 
 
 class BalanceAdjustRequest(BaseModel):
@@ -23,18 +26,21 @@ class BalanceAdjustRequest(BaseModel):
 
 
 class FeeSettingsUpdateRequest(BaseModel):
-    fee_percentage: Optional[float] = Field(None, ge=0, le=100)
-    deposit_address: Optional[str] = Field(None, max_length=255)
-    min_deposit: Optional[float] = Field(None, ge=0)
-    min_balance_multiplier: Optional[float] = Field(None, ge=1, le=10)
-    fee_enabled: Optional[bool] = None
+    fee_percentage: float | None = Field(None, ge=0, le=100)
+    deposit_address: str | None = Field(None, max_length=255)
+    min_deposit: float | None = Field(None, ge=0)
+    min_balance_multiplier: float | None = Field(None, ge=1, le=10)
+    fee_enabled: bool | None = None
 
 
 class UserFeeOverrideRequest(BaseModel):
-    fee_percentage_override: Optional[float] = Field(None, ge=0, le=100, description="Set to null to use global rate")
+    fee_percentage_override: float | None = Field(
+        None, ge=0, le=100, description="Set to null to use global rate"
+    )
 
 
 # ── Response schemas ──
+
 
 class WalletBalanceResponse(BaseModel):
     balance: float
@@ -55,28 +61,28 @@ class WalletSummaryResponse(BaseModel):
 class FeeTransactionResponse(BaseModel):
     id: str
     user_id: str
-    basket_id: Optional[str]
+    basket_id: str | None
     type: str
     amount: float
     balance_before: float
     balance_after: float
-    fee_percentage: Optional[float]
-    basket_pnl: Optional[float]
-    note: Optional[str]
+    fee_percentage: float | None
+    basket_pnl: float | None
+    note: str | None
     created_at: str
-    created_by: Optional[str]
+    created_by: str | None
 
 
 class DepositRequestResponse(BaseModel):
     id: str
     user_id: str
-    user_email: Optional[str] = None
+    user_email: str | None = None
     amount: float
     tx_hash: str
     status: str
-    reviewed_by: Optional[str]
-    reviewed_at: Optional[str]
-    reject_reason: Optional[str]
+    reviewed_by: str | None
+    reviewed_at: str | None
+    reject_reason: str | None
     created_at: str
 
 

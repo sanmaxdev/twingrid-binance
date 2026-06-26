@@ -1,23 +1,23 @@
-from datetime import datetime, timezone
+import secrets
+from datetime import UTC, datetime
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
 
 from app.api.deps import get_db, require_admin
-from app.core.rate_limit import get_client_ip
-from app.core.security import get_password_hash, create_access_token
 from app.core.email import send_password_reset_email
 from app.core.enums import AuditAction, Role
-from app.models.user import User
-from app.models.session import Session
+from app.core.rate_limit import get_client_ip
+from app.core.security import get_password_hash
 from app.models.account import Account
-from app.models.basket import Basket
 from app.models.audit_log import AuditLog
+from app.models.basket import Basket
+from app.models.session import Session
+from app.models.user import User
 from app.models.user_subscription import UserSubscription
 from app.services.audit_service import record_audit
-
-import secrets
 
 router = APIRouter()
 
@@ -87,7 +87,9 @@ async def list_users(
                 "subscription": {
                     "plan_id": sub_map[u.id].plan_id if u.id in sub_map else "free",
                     "status": sub_map[u.id].status if u.id in sub_map else "active",
-                } if True else None,
+                }
+                if True
+                else None,
             }
             for u in users
         ],
@@ -110,20 +112,29 @@ async def get_user_detail(
         raise HTTPException(status_code=404, detail="User not found")
 
     # Counts
-    account_count = (await db.execute(
-        select(func.count()).select_from(Account).where(Account.user_id == user_id, Account.deleted_at == None)
-    )).scalar()
-
-    active_session_count = (await db.execute(
-        select(func.count()).select_from(Session).where(
-            Session.user_id == user_id, Session.revoked_at == None,
-            Session.expires_at > datetime.now(timezone.utc)
+    account_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(Account)
+            .where(Account.user_id == user_id, Account.deleted_at == None)
         )
-    )).scalar()
+    ).scalar()
 
-    basket_count = (await db.execute(
-        select(func.count()).select_from(Basket).where(Basket.user_id == user_id)
-    )).scalar()
+    active_session_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(Session)
+            .where(
+                Session.user_id == user_id,
+                Session.revoked_at == None,
+                Session.expires_at > datetime.now(UTC),
+            )
+        )
+    ).scalar()
+
+    basket_count = (
+        await db.execute(select(func.count()).select_from(Basket).where(Basket.user_id == user_id))
+    ).scalar()
 
     return {
         "id": str(user.id),
@@ -166,7 +177,7 @@ async def suspend_user(
     if user.role == Role.SUPER_ADMIN.value:
         raise HTTPException(status_code=403, detail="Cannot suspend a super admin")
 
-    user.suspended_at = datetime.now(timezone.utc)
+    user.suspended_at = datetime.now(UTC)
     user.suspended_reason = reason or "Suspended by admin"
     user.suspended_by = admin.id
 
@@ -175,7 +186,7 @@ async def suspend_user(
         select(Session).where(Session.user_id == user_id, Session.revoked_at == None)
     )
     for s in sessions_result.scalars().all():
-        s.revoked_at = datetime.now(timezone.utc)
+        s.revoked_at = datetime.now(UTC)
         s.revoked_reason = "User suspended"
 
     # Halt all running accounts
@@ -191,8 +202,10 @@ async def suspend_user(
         acc.auto_trade_enabled = False
 
     await record_audit(
-        db, action=AuditAction.USER_SUSPENDED,
-        actor_user_id=admin.id, target_user_id=user_id,
+        db,
+        action=AuditAction.USER_SUSPENDED,
+        actor_user_id=admin.id,
+        target_user_id=user_id,
         payload={"reason": reason},
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -223,8 +236,10 @@ async def unsuspend_user(
     user.suspended_by = None
 
     await record_audit(
-        db, action=AuditAction.USER_UNSUSPENDED,
-        actor_user_id=admin.id, target_user_id=user_id,
+        db,
+        action=AuditAction.USER_UNSUSPENDED,
+        actor_user_id=admin.id,
+        target_user_id=user_id,
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -251,13 +266,15 @@ async def force_logout(
     )
     count = 0
     for s in sessions_result.scalars().all():
-        s.revoked_at = datetime.now(timezone.utc)
+        s.revoked_at = datetime.now(UTC)
         s.revoked_reason = "Forced logout by admin"
         count += 1
 
     await record_audit(
-        db, action=AuditAction.USER_FORCE_LOGOUT,
-        actor_user_id=admin.id, target_user_id=user_id,
+        db,
+        action=AuditAction.USER_FORCE_LOGOUT,
+        actor_user_id=admin.id,
+        target_user_id=user_id,
         payload={"sessions_revoked": count},
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -283,11 +300,14 @@ async def force_password_reset(
     token = secrets.token_urlsafe(32)
     user.password_reset_token_hash = get_password_hash(token)
     from datetime import timedelta
-    user.password_reset_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    user.password_reset_expires_at = datetime.now(UTC) + timedelta(hours=1)
 
     await record_audit(
-        db, action=AuditAction.USER_FORCE_PASSWORD_RESET,
-        actor_user_id=admin.id, target_user_id=user_id,
+        db,
+        action=AuditAction.USER_FORCE_PASSWORD_RESET,
+        actor_user_id=admin.id,
+        target_user_id=user_id,
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -309,7 +329,8 @@ async def get_user_accounts(
 ):
     """List all accounts for a specific user (admin read-only)."""
     result = await db.execute(
-        select(Account).where(Account.user_id == user_id, Account.deleted_at == None)
+        select(Account)
+        .where(Account.user_id == user_id, Account.deleted_at == None)
         .order_by(Account.created_at.desc())
     )
     accounts = result.scalars().all()
@@ -343,8 +364,11 @@ async def get_user_baskets(
     total = count_result.scalar()
 
     result = await db.execute(
-        select(Basket).where(Basket.user_id == user_id)
-        .order_by(Basket.opened_at.desc()).offset(offset).limit(per_page)
+        select(Basket)
+        .where(Basket.user_id == user_id)
+        .order_by(Basket.opened_at.desc())
+        .offset(offset)
+        .limit(per_page)
     )
     baskets = result.scalars().all()
 
@@ -382,16 +406,18 @@ async def get_user_audit_log(
     offset = (page - 1) * per_page
 
     count_result = await db.execute(
-        select(func.count()).select_from(AuditLog).where(
-            or_(AuditLog.actor_user_id == user_id, AuditLog.target_user_id == user_id)
-        )
+        select(func.count())
+        .select_from(AuditLog)
+        .where(or_(AuditLog.actor_user_id == user_id, AuditLog.target_user_id == user_id))
     )
     total = count_result.scalar()
 
     result = await db.execute(
-        select(AuditLog).where(
-            or_(AuditLog.actor_user_id == user_id, AuditLog.target_user_id == user_id)
-        ).order_by(AuditLog.occurred_at.desc()).offset(offset).limit(per_page)
+        select(AuditLog)
+        .where(or_(AuditLog.actor_user_id == user_id, AuditLog.target_user_id == user_id))
+        .order_by(AuditLog.occurred_at.desc())
+        .offset(offset)
+        .limit(per_page)
     )
     entries = result.scalars().all()
 
@@ -436,11 +462,12 @@ async def impersonate_user(
 
     # Create a scoped access token with impersonation metadata
     from datetime import timedelta
-    from jose import jwt
-    from app.core.config import settings as app_settings
-    import time
 
-    expire = datetime.now(timezone.utc) + timedelta(minutes=30)
+    from jose import jwt
+
+    from app.core.config import settings as app_settings
+
+    expire = datetime.now(UTC) + timedelta(minutes=30)
     token_data = {
         "sub": str(user_id),
         "exp": expire,
@@ -451,8 +478,10 @@ async def impersonate_user(
     impersonation_token = jwt.encode(token_data, app_settings.JWT_SECRET, algorithm="HS256")
 
     await record_audit(
-        db, action=AuditAction.IMPERSONATION_STARTED,
-        actor_user_id=admin.id, target_user_id=user_id,
+        db,
+        action=AuditAction.IMPERSONATION_STARTED,
+        actor_user_id=admin.id,
+        target_user_id=user_id,
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )

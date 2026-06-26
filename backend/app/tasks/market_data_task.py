@@ -2,18 +2,17 @@
 Market Data Auto-Update Celery Task.
 
 Runs daily to keep all cached datasets up to date with the latest month's data.
-For each symbol/interval combination that exists in the cache, 
+For each symbol/interval combination that exists in the cache,
 re-downloads the current month to pick up new candles.
 """
 
 import asyncio
+from datetime import UTC, datetime
+
 import structlog
-from datetime import datetime, timezone
 from celery import shared_task
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
@@ -47,7 +46,7 @@ async def _auto_update_market_data():
     """Re-download the current month for all cached datasets."""
     async_session = _get_md_session()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     results = {
         "started_at": now.isoformat(),
         "datasets_updated": 0,
@@ -80,8 +79,8 @@ async def _auto_update_market_data():
 
             # Import the download functions
             from app.services.market_data_service import (
-                download_klines_month,
                 download_funding_rates_month,
+                download_klines_month,
             )
 
             # Track which symbols already had funding updated
@@ -91,15 +90,11 @@ async def _auto_update_market_data():
                 sym, dtype, interval = row.symbol, row.data_type, row.interval
                 try:
                     if dtype == "klines":
-                        result = await download_klines_month(
-                            sym, interval, now.year, now.month, db
-                        )
+                        result = await download_klines_month(sym, interval, now.year, now.month, db)
                         count = result.get("candle_count", 0)
                         results["total_candles"] += count
                         results["datasets_updated"] += 1
-                        logger.info(
-                            f"auto_update: {sym} {interval} klines → {count} candles"
-                        )
+                        logger.info(f"auto_update: {sym} {interval} klines → {count} candles")
 
                     elif dtype == "funding_rate":
                         if sym not in funding_updated:
@@ -110,16 +105,14 @@ async def _auto_update_market_data():
                             results["total_funding"] += count
                             results["datasets_updated"] += 1
                             funding_updated.add(sym)
-                            logger.info(
-                                f"auto_update: {sym} funding → {count} rates"
-                            )
+                            logger.info(f"auto_update: {sym} funding → {count} rates")
                 except Exception as e:
                     err_msg = f"{sym} {dtype} {interval}: {str(e)}"
                     logger.error(f"auto_update error: {err_msg}")
                     results["errors"].append(err_msg)
 
             results["status"] = "ok" if not results["errors"] else "partial"
-            results["completed_at"] = datetime.now(timezone.utc).isoformat()
+            results["completed_at"] = datetime.now(UTC).isoformat()
 
             # Save update log
             await _save_log(db, results)
@@ -128,7 +121,7 @@ async def _auto_update_market_data():
         logger.error(f"market_data_auto_update failed: {e}", exc_info=True)
         results["status"] = "failed"
         results["errors"].append(str(e))
-        results["completed_at"] = datetime.now(timezone.utc).isoformat()
+        results["completed_at"] = datetime.now(UTC).isoformat()
         # Try to save log even on failure
         try:
             async with async_session() as db:
@@ -141,17 +134,20 @@ async def _auto_update_market_data():
 
 async def _save_log(db: AsyncSession, results: dict):
     """Save an update log entry to platform_settings as JSON."""
-    from app.models.platform_settings import PlatformSettings
     from sqlalchemy.orm.attributes import flag_modified
+
+    from app.models.platform_settings import PlatformSettings
 
     # Store last N update logs (keep up to 50)
     log_key = "market_data_update_logs"
-    existing = (await db.execute(
-        select(PlatformSettings).where(PlatformSettings.key == log_key)
-    )).scalars().first()
+    existing = (
+        (await db.execute(select(PlatformSettings).where(PlatformSettings.key == log_key)))
+        .scalars()
+        .first()
+    )
 
     log_entry = {
-        "timestamp": results.get("started_at", datetime.now(timezone.utc).isoformat()),
+        "timestamp": results.get("started_at", datetime.now(UTC).isoformat()),
         "completed_at": results.get("completed_at"),
         "status": results.get("status", "unknown"),
         "datasets_updated": results.get("datasets_updated", 0),

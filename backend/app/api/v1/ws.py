@@ -7,12 +7,12 @@ Provides authenticated WebSocket connections for:
 - Admin event feed
 """
 
-import json
 import asyncio
+import json
+
 import structlog
-from typing import Dict, Set
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from jose import jwt, JWTError
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from jose import JWTError, jwt
 
 from app.core.config import settings
 from app.core.redis_client import redis_client
@@ -26,9 +26,9 @@ class ConnectionManager:
 
     def __init__(self):
         # channel_name → set of WebSocket connections
-        self.channels: Dict[str, Set[WebSocket]] = {}
+        self.channels: dict[str, set[WebSocket]] = {}
         # ws → user info
-        self.ws_meta: Dict[WebSocket, dict] = {}
+        self.ws_meta: dict[WebSocket, dict] = {}
         self._relay_task = None
 
     async def connect(self, ws: WebSocket, user_id: str, role: str):
@@ -49,7 +49,12 @@ class ConnectionManager:
         if channel not in self.channels:
             self.channels[channel] = set()
         self.channels[channel].add(ws)
-        logger.info("ws_subscribed", channel=channel, user_id=self.ws_meta.get(ws, {}).get("user_id"), total_subs=len(self.channels[channel]))
+        logger.info(
+            "ws_subscribed",
+            channel=channel,
+            user_id=self.ws_meta.get(ws, {}).get("user_id"),
+            total_subs=len(self.channels[channel]),
+        )
 
     def unsubscribe(self, ws: WebSocket, channel: str):
         if channel in self.channels:
@@ -71,7 +76,13 @@ class ConnectionManager:
         for ws in dead:
             self.disconnect(ws)
         if sent > 0:
-            logger.info("ws_broadcast", channel=channel, sent=sent, dead=len(dead), msg_type=data.get("type", "?"))
+            logger.info(
+                "ws_broadcast",
+                channel=channel,
+                sent=sent,
+                dead=len(dead),
+                msg_type=data.get("type", "?"),
+            )
 
     def get_user_id(self, ws: WebSocket) -> str:
         return self.ws_meta.get(ws, {}).get("user_id", "")
@@ -157,10 +168,12 @@ async def websocket_endpoint(
     # Get user role from database
     role = "USER"
     try:
-        from app.core.database import AsyncSessionLocal
-        from sqlalchemy import select
-        from app.models.user import User
         import uuid
+
+        from sqlalchemy import select
+
+        from app.core.database import AsyncSessionLocal
+        from app.models.user import User
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(User.role).where(User.id == uuid.UUID(user_id)))
@@ -186,7 +199,9 @@ async def websocket_endpoint(
                     manager.subscribe(ws, channel)
                     await ws.send_json({"type": "subscribed", "channel": channel})
                 else:
-                    await ws.send_json({"type": "error", "message": f"Access denied for channel: {channel}"})
+                    await ws.send_json(
+                        {"type": "error", "message": f"Access denied for channel: {channel}"}
+                    )
 
             elif action == "unsubscribe":
                 channel = data.get("channel", "")
@@ -209,6 +224,7 @@ async def publish_to_channel(channel: str, event_type: str, data: dict):
 
 
 # ─── Redis Pub/Sub Relay (bridges ws_manager container → frontend clients) ───
+
 
 async def _redis_pubsub_relay():
     """Subscribe to Redis pub/sub channels from ws_manager and relay
@@ -233,11 +249,14 @@ async def _redis_pubsub_relay():
 
                     # Broadcast to all subscribers of account:{account_id}
                     channel = f"account:{account_id}"
-                    await manager.broadcast(channel, {
-                        "type": event_type,
-                        "channel": channel,
-                        "data": data,
-                    })
+                    await manager.broadcast(
+                        channel,
+                        {
+                            "type": event_type,
+                            "channel": channel,
+                            "data": data,
+                        },
+                    )
                 except (json.JSONDecodeError, Exception) as e:
                     logger.debug("ws_relay_message_error", error=str(e))
 

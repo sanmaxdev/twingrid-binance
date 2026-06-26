@@ -9,12 +9,9 @@ This project is under active development. Security fixes are applied to the late
 **Please do not report security vulnerabilities through public GitHub issues, discussions,
 or pull requests.**
 
-Instead, report them privately using one of the following channels:
-
-- **GitHub Security Advisories** — use the
-  [**Report a vulnerability**](https://github.com/sanmaxdev/twingrid-binance/security/advisories/new)
-  button under the repository's **Security** tab (preferred).
-- **Email** — `help@twingridbot.com`
+Instead, report them privately through **GitHub Security Advisories** — use the
+[**Report a vulnerability**](https://github.com/sanmaxdev/twingrid-binance/security/advisories/new)
+button under the repository's **Security** tab.
 
 Please include:
 

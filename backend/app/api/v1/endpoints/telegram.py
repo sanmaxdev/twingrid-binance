@@ -1,17 +1,17 @@
 """Telegram webhook + user connection API endpoints."""
 
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_current_user
+from app.api.deps import get_current_user, get_db
+from app.core.telegram_bot import send_message, verify_webhook_request
 from app.models.user import User
-from app.core.config import settings
-from app.core.telegram_bot import verify_webhook_request, send_message
 
 logger = structlog.get_logger()
 
@@ -53,7 +53,6 @@ async def telegram_webhook(
     chat_id = chat.get("id")
     from_user = message.get("from", {})
     tg_username = from_user.get("username")
-    tg_first_name = from_user.get("first_name", "")
 
     if not chat_id:
         return {"ok": True}
@@ -77,7 +76,7 @@ async def telegram_webhook(
         result = await db.execute(
             select(User).where(
                 User.telegram_link_token == token,
-                User.telegram_link_expires_at > datetime.now(timezone.utc),
+                User.telegram_link_expires_at > datetime.now(UTC),
             )
         )
         user = result.scalars().first()
@@ -110,7 +109,7 @@ async def telegram_webhook(
         # Link Telegram to user
         user.telegram_chat_id = chat_id
         user.telegram_username = tg_username
-        user.telegram_connected_at = datetime.now(timezone.utc)
+        user.telegram_connected_at = datetime.now(UTC)
         user.telegram_link_token = None  # Clear used token
         user.telegram_link_expires_at = None
         if not user.telegram_notifications:
@@ -128,21 +127,23 @@ async def telegram_webhook(
             f"⚙️ <i>Manage preferences in your Dashboard</i>\n"
             f"   → Profile → Telegram Settings",
         )
-        logger.info("telegram_connected", user_id=str(user.id), chat_id=chat_id, username=tg_username)
+        logger.info(
+            "telegram_connected", user_id=str(user.id), chat_id=chat_id, username=tg_username
+        )
         return {"ok": True}
 
     # Handle /disconnect command
     if text.strip() == "/disconnect":
-        result = await db.execute(
-            select(User).where(User.telegram_chat_id == chat_id)
-        )
+        result = await db.execute(select(User).where(User.telegram_chat_id == chat_id))
         user = result.scalars().first()
         if user:
             user.telegram_chat_id = None
             user.telegram_username = None
             user.telegram_connected_at = None
             await db.commit()
-            await send_message(chat_id, "✅ <b>Disconnected.</b>\nYou will no longer receive TwinGrid alerts.")
+            await send_message(
+                chat_id, "✅ <b>Disconnected.</b>\nYou will no longer receive TwinGrid alerts."
+            )
         else:
             await send_message(chat_id, "ℹ️ No account is linked to this Telegram.")
         return {"ok": True}
@@ -175,7 +176,9 @@ async def get_telegram_status(
     result = {
         "connected": connected,
         "username": current_user.telegram_username if connected else None,
-        "connected_at": current_user.telegram_connected_at.isoformat() if connected and current_user.telegram_connected_at else None,
+        "connected_at": current_user.telegram_connected_at.isoformat()
+        if connected and current_user.telegram_connected_at
+        else None,
         "preferences": current_user.telegram_notifications or DEFAULT_TG_PREFS,
     }
 
@@ -183,7 +186,9 @@ async def get_telegram_status(
         # Generate a new deep-link token
         token = secrets.token_urlsafe(32)
         current_user.telegram_link_token = token
-        current_user.telegram_link_expires_at = datetime.now(timezone.utc) + timedelta(minutes=LINK_TOKEN_TTL_MINUTES)
+        current_user.telegram_link_expires_at = datetime.now(UTC) + timedelta(
+            minutes=LINK_TOKEN_TTL_MINUTES
+        )
         await db.commit()
         result["connect_url"] = f"https://t.me/{BOT_USERNAME}?start={token}"
         result["expires_in_seconds"] = LINK_TOKEN_TTL_MINUTES * 60

@@ -1,5 +1,4 @@
-import math
-from typing import List, Dict, Any
+from typing import Any
 
 
 def clamp(val: float, min_val: float, max_val: float) -> float:
@@ -27,7 +26,7 @@ def calculate_grid_levels(
     initial_capital: float = 0.0,
     tp_mode: str = "pct",
     tp_fixed_amount: float = 0.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Calculates the BO and SO levels, including required margin and target fill prices.
 
@@ -89,33 +88,37 @@ def calculate_grid_levels(
         else:
             fill_price = bo_price * (1 + cum_dev)
 
-        so_margin = bo_margin * (volume_scale ** n)
+        so_margin = bo_margin * (volume_scale**n)
         so_notional = so_margin * leverage
         so_qty = so_notional / fill_price if fill_price > 0 else 0
 
-        levels.append({
-            "so_index": n,
-            "step_pct": step_n,
-            "cum_dev": cum_dev,
-            "fill_price": round(fill_price, 8),
-            "margin": round(so_margin, 8),
-            "notional": round(so_notional, 8),
-            "qty": round(so_qty, 8)
-        })
+        levels.append(
+            {
+                "so_index": n,
+                "step_pct": step_n,
+                "cum_dev": cum_dev,
+                "fill_price": round(fill_price, 8),
+                "margin": round(so_margin, 8),
+                "notional": round(so_notional, 8),
+                "qty": round(so_qty, 8),
+            }
+        )
 
     return {
         "bo": {
             "price": round(bo_price, 8),
             "margin": round(bo_margin, 8),
             "notional": round(bo_notional, 8),
-            "qty": round(bo_qty, 8)
+            "qty": round(bo_qty, 8),
         },
         "so_levels": levels,
-        "tp_target_usd": round(tp_target_usd, 8)
+        "tp_target_usd": round(tp_target_usd, 8),
     }
 
 
-def calculate_tp_price(side: str, avg_entry: float, position_qty: float, tp_target_usd: float) -> float:
+def calculate_tp_price(
+    side: str, avg_entry: float, position_qty: float, tp_target_usd: float
+) -> float:
     """
     Calculates the Take Profit price based on target USD and current position.
     """

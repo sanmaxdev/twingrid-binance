@@ -1,16 +1,15 @@
 """Admin cross-user audit log endpoint."""
 
 from datetime import datetime
-from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 from sqlalchemy.orm import aliased
 
 from app.api.deps import get_db, require_admin
-from app.models.user import User
 from app.models.audit_log import AuditLog
+from app.models.user import User
 
 router = APIRouter()
 
@@ -23,8 +22,8 @@ async def list_audit_log(
     per_page: int = Query(50, ge=1, le=100),
     action: str = Query(None),
     user_id: str = Query(None),
-    start_date: Optional[str] = Query(None, description="ISO date, e.g. 2026-04-01"),
-    end_date: Optional[str] = Query(None, description="ISO date, e.g. 2026-04-30"),
+    start_date: str | None = Query(None, description="ISO date, e.g. 2026-04-01"),
+    end_date: str | None = Query(None, description="ISO date, e.g. 2026-04-30"),
 ):
     """Cross-user audit log for admins with user details and date range filtering."""
 
@@ -49,11 +48,10 @@ async def list_audit_log(
 
     if user_id:
         import uuid as _uuid
+
         try:
             uid = _uuid.UUID(user_id)
-            stmt = stmt.where(
-                (AuditLog.actor_user_id == uid) | (AuditLog.target_user_id == uid)
-            )
+            stmt = stmt.where((AuditLog.actor_user_id == uid) | (AuditLog.target_user_id == uid))
         except ValueError:
             pass
 
@@ -88,15 +86,23 @@ async def list_audit_log(
             {
                 "id": row.AuditLog.id,
                 "action": row.AuditLog.action,
-                "actor_user_id": str(row.AuditLog.actor_user_id) if row.AuditLog.actor_user_id else None,
+                "actor_user_id": str(row.AuditLog.actor_user_id)
+                if row.AuditLog.actor_user_id
+                else None,
                 "actor_email": row.actor_email,
                 "actor_name": row.actor_name,
-                "target_user_id": str(row.AuditLog.target_user_id) if row.AuditLog.target_user_id else None,
+                "target_user_id": str(row.AuditLog.target_user_id)
+                if row.AuditLog.target_user_id
+                else None,
                 "target_email": row.target_email,
                 "target_name": row.target_name,
-                "target_account_id": str(row.AuditLog.target_account_id) if row.AuditLog.target_account_id else None,
+                "target_account_id": str(row.AuditLog.target_account_id)
+                if row.AuditLog.target_account_id
+                else None,
                 "ip_address": row.AuditLog.ip_address,
-                "occurred_at": row.AuditLog.occurred_at.isoformat() if row.AuditLog.occurred_at else None,
+                "occurred_at": row.AuditLog.occurred_at.isoformat()
+                if row.AuditLog.occurred_at
+                else None,
                 "payload": row.AuditLog.payload,
                 "impersonating": row.AuditLog.impersonating,
             }

@@ -1,9 +1,11 @@
 """Tenant scope dependency for multi-tenant isolation per §12.2."""
 
 from uuid import UUID
+
 from sqlalchemy import Select
-from app.models.user import User
+
 from app.core.enums import Role
+from app.models.user import User
 
 
 class TenantScope:
@@ -46,5 +48,6 @@ class TenantScope:
     def assert_owner(self, resource_user_id: UUID):
         """Raise if current user doesn't own the resource. Returns 404 per §3.5."""
         from fastapi import HTTPException, status
+
         if resource_user_id != self.user_id and not self.is_admin:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")

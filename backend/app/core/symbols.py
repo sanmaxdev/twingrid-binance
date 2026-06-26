@@ -5,17 +5,17 @@ Single source of truth for all supported trading pairs.
 Every backend module imports from here — no more scattered hardcoded lists.
 """
 
-from typing import Dict, Any, List, Set
+from typing import Any
 
 # ── Supported symbols (order matters for UI display) ──
-SUPPORTED_SYMBOLS: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
-SUPPORTED_SYMBOLS_SET: Set[str] = set(SUPPORTED_SYMBOLS)
+SUPPORTED_SYMBOLS: list[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+SUPPORTED_SYMBOLS_SET: set[str] = set(SUPPORTED_SYMBOLS)
 
 # ── Maximum concurrent active symbols per account ──
 MAX_ACTIVE_SYMBOLS: int = 3
 
 # ── Per-symbol metadata (Binance exchange info) ──
-SYMBOL_META: Dict[str, Dict[str, Any]] = {
+SYMBOL_META: dict[str, dict[str, Any]] = {
     "BTCUSDT": {
         "min_qty": 0.001,
         "min_notional": 5.0,
@@ -55,17 +55,20 @@ SYMBOL_META: Dict[str, Dict[str, Any]] = {
 }
 
 
-def get_symbol_meta(symbol: str) -> Dict[str, Any]:
+def get_symbol_meta(symbol: str) -> dict[str, Any]:
     """Get metadata for a symbol, falling back to conservative defaults."""
-    return SYMBOL_META.get(symbol, {
-        "min_qty": 0.1,
-        "min_notional": 5.0,
-        "price_approx": 1.0,
-        "qty_precision_step": 0.1,
-        "tick_precision": 0.0001,
-        "icon": "?",
-        "label": symbol,
-    })
+    return SYMBOL_META.get(
+        symbol,
+        {
+            "min_qty": 0.1,
+            "min_notional": 5.0,
+            "price_approx": 1.0,
+            "qty_precision_step": 0.1,
+            "tick_precision": 0.0001,
+            "icon": "?",
+            "label": symbol,
+        },
+    )
 
 
 def normalize_active_symbols(config: dict) -> list:

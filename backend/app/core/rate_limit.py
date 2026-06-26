@@ -1,8 +1,10 @@
 """Redis-based rate limiter per §13.4."""
 
 from datetime import timedelta
-from fastapi import Request, HTTPException, status
+
 import structlog
+from fastapi import HTTPException, Request, status
+
 from app.core.redis_client import redis_client
 
 logger = structlog.get_logger()
@@ -19,6 +21,7 @@ class RateLimiter:
     async def check(self, identifier: str) -> bool:
         """Return True if request is allowed, False if rate-limited."""
         import time
+
         key = f"ratelimit:{self.key_prefix}:{identifier}"
         now = time.time()
         pipe = redis_client.pipeline()
@@ -37,16 +40,24 @@ class RateLimiter:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many requests. Please try again later.",
-                headers={"Retry-After": str(self.window_seconds)}
+                headers={"Retry-After": str(self.window_seconds)},
             )
 
 
 # Pre-configured limiters per §13.4
 login_limiter_ip = RateLimiter(max_requests=20, window=timedelta(minutes=15), key_prefix="login_ip")
-login_limiter_email = RateLimiter(max_requests=10, window=timedelta(minutes=15), key_prefix="login_email")
-register_limiter_ip = RateLimiter(max_requests=3, window=timedelta(hours=1), key_prefix="register_ip")
-forgot_password_limiter = RateLimiter(max_requests=3, window=timedelta(hours=1), key_prefix="forgot_email")
-resend_verification_limiter = RateLimiter(max_requests=3, window=timedelta(hours=1), key_prefix="resend_email")
+login_limiter_email = RateLimiter(
+    max_requests=10, window=timedelta(minutes=15), key_prefix="login_email"
+)
+register_limiter_ip = RateLimiter(
+    max_requests=3, window=timedelta(hours=1), key_prefix="register_ip"
+)
+forgot_password_limiter = RateLimiter(
+    max_requests=3, window=timedelta(hours=1), key_prefix="forgot_email"
+)
+resend_verification_limiter = RateLimiter(
+    max_requests=3, window=timedelta(hours=1), key_prefix="resend_email"
+)
 api_limiter_user = RateLimiter(max_requests=100, window=timedelta(minutes=1), key_prefix="api_user")
 
 

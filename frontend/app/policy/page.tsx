@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { motion } from "framer-motion";
+import { SUPPORT_EMAIL } from "@/lib/site";
 
 export default function PolicyPage() {
   return (
@@ -76,7 +77,7 @@ export default function PolicyPage() {
             <div className="mt-12 p-6 bg-[#2B2F36] rounded-xl border border-[#2B2F36]">
               <p className="text-sm m-0 text-[#EAECEF]">
                 If you have questions about these terms or our privacy practices, please contact us at 
-                <a href="mailto:help@twingridbot.com" className="text-[#F0B90B] ml-1">help@twingridbot.com</a>.
+                <a href={`mailto:${SUPPORT_EMAIL}`} className="text-[#F0B90B] ml-1">{SUPPORT_EMAIL}</a>.
               </p>
             </div>
           </div>

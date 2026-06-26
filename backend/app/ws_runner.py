@@ -9,7 +9,9 @@ Usage:
 
 import asyncio
 import signal
+
 import structlog
+
 from app.core.logging import setup_logging
 from app.services.binance_ws_manager import BinanceWSManager
 

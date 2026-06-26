@@ -7,20 +7,19 @@ plus session management and leaderboard queries.
 
 import json
 import uuid
-import numpy as np
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select, desc
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
 from app.api.deps import require_admin, require_super_admin
-from app.models.user import User
+from app.core.database import get_db
 from app.models.ai_tuner_session import AiTunerSession
+from app.models.user import User
 from app.services.gemini_agent import run_agent
 
 router = APIRouter()
@@ -37,6 +36,7 @@ async def ai_tuner_status(
 ):
     """Check AI tuner access: returns maintenance status and whether user can run."""
     from app.core.enums import Role
+
     user_role = Role(admin_user.role) if isinstance(admin_user.role, str) else admin_user.role
     is_super = user_role == Role.SUPER_ADMIN
     return {
@@ -49,8 +49,14 @@ async def ai_tuner_status(
 
 # ─── Request / Response Models ─────────────────────────────────────────────────
 
+
 class TunerRunRequest(BaseModel):
-    goal: str = Field(..., min_length=5, max_length=1000, description="Optimization goal / instructions for the AI")
+    goal: str = Field(
+        ...,
+        min_length=5,
+        max_length=1000,
+        description="Optimization goal / instructions for the AI",
+    )
     symbol: str = Field(default="BTCUSDT", description="Trading pair to optimize")
 
 
@@ -63,10 +69,11 @@ class SessionSummary(BaseModel):
     best_sharpe: float
     best_pnl_pct: float
     created_at: str
-    completed_at: Optional[str] = None
+    completed_at: str | None = None
 
 
 # ─── Helper: numpy-safe JSON serializer ─────────────────────────────────────────
+
 
 def safe_json(obj):
     """Convert numpy types to native Python for JSON serialization."""
@@ -87,6 +94,7 @@ def safe_json(obj):
 
 # ─── SSE Streaming Endpoint ─────────────────────────────────────────────────────
 
+
 @router.post("/ai-tuner/run")
 async def run_ai_tuner(
     request: TunerRunRequest,
@@ -106,6 +114,7 @@ async def run_ai_tuner(
     """
     # Check maintenance mode — super admins bypass this
     from app.core.enums import Role
+
     user_role = Role(admin_user.role) if isinstance(admin_user.role, str) else admin_user.role
     if MAINTENANCE_MODE and user_role != Role.SUPER_ADMIN:
         raise HTTPException(503, detail=MAINTENANCE_MESSAGE)
@@ -153,7 +162,13 @@ async def run_ai_tuner(
                 if event_type == "thinking":
                     messages.append({"role": "assistant", "content": event_data.get("content", "")})
                 elif event_type == "function_call":
-                    messages.append({"role": "function_call", "name": event_data.get("name"), "args": event_data.get("args")})
+                    messages.append(
+                        {
+                            "role": "function_call",
+                            "name": event_data.get("name"),
+                            "args": event_data.get("args"),
+                        }
+                    )
                 elif event_type == "function_result":
                     result = event_data.get("result", {})
                     if event_data.get("name") == "run_backtest" and "error" not in result:
@@ -166,7 +181,13 @@ async def run_ai_tuner(
                             best_pnl_pct = result.get("total_pnl_pct", 0)
                             best_max_dd = result.get("max_drawdown_pct", 0)
                             best_config = result.get("config_used")
-                    messages.append({"role": "function_result", "name": event_data.get("name"), "result": result})
+                    messages.append(
+                        {
+                            "role": "function_result",
+                            "name": event_data.get("name"),
+                            "result": result,
+                        }
+                    )
                 elif event_type == "complete":
                     comp = event_data
                     best_config = comp.get("best_config", best_config)
@@ -196,11 +217,12 @@ async def run_ai_tuner(
                 sess.best_sharpe = float(best_sharpe)
                 sess.best_pnl_pct = float(best_pnl_pct)
                 sess.best_max_drawdown = float(best_max_dd)
-                sess.completed_at = datetime.now(timezone.utc)
+                sess.completed_at = datetime.now(UTC)
                 await db.commit()
         except Exception as e:
             # Non-critical — log but don't fail the stream
             import structlog
+
             structlog.get_logger().error(f"Failed to update AI session: {e}")
 
         yield f"event: done\ndata: {json.dumps({'session_id': session_id})}\n\n"
@@ -218,6 +240,7 @@ async def run_ai_tuner(
 
 # ─── Session Management ─────────────────────────────────────────────────────────
 
+
 @router.get("/ai-tuner/sessions")
 async def list_sessions(
     admin_user: User = Depends(require_admin),
@@ -226,9 +249,7 @@ async def list_sessions(
 ):
     """List past AI tuner sessions."""
     result = await db.execute(
-        select(AiTunerSession)
-        .order_by(desc(AiTunerSession.created_at))
-        .limit(limit)
+        select(AiTunerSession).order_by(desc(AiTunerSession.created_at)).limit(limit)
     )
     sessions = result.scalars().all()
 
@@ -318,14 +339,16 @@ async def get_leaderboard(
     leaderboard = []
     for s in sessions:
         if s.best_config:
-            leaderboard.append({
-                "session_id": str(s.id),
-                "symbol": s.symbol,
-                "sharpe_ratio": round(s.best_sharpe, 2),
-                "pnl_pct": round(s.best_pnl_pct, 2),
-                "max_drawdown": round(s.best_max_drawdown, 2),
-                "config": s.best_config,
-                "created_at": s.created_at.isoformat() if s.created_at else None,
-            })
+            leaderboard.append(
+                {
+                    "session_id": str(s.id),
+                    "symbol": s.symbol,
+                    "sharpe_ratio": round(s.best_sharpe, 2),
+                    "pnl_pct": round(s.best_pnl_pct, 2),
+                    "max_drawdown": round(s.best_max_drawdown, 2),
+                    "config": s.best_config,
+                    "created_at": s.created_at.isoformat() if s.created_at else None,
+                }
+            )
 
     return leaderboard

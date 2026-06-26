@@ -51,7 +51,18 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N"]
-ignore = ["B008"]
+ignore = [
+    "B008",   # FastAPI injects dependencies via callables in defaults (Depends())
+    "E501",   # line length is enforced by `ruff format`, not the linter
+    "E711",   # SQLAlchemy filters use `== None` (compiles to SQL `IS NULL`)
+    "E712",   # SQLAlchemy filters use `== True` / `== False`
+    "N806",   # allow PascalCase locals: `SessionLocal` factory, aliased() entities, constants
+    "UP042",  # str-Enum -> StrEnum changes __str__ semantics; not safe without test coverage
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Alembic migration scripts run imports after path setup and re-export metadata.
+"alembic/*" = ["E402", "F401"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -1,13 +1,14 @@
 """Centralized audit logging service per §16.1."""
 
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
-from sqlalchemy.ext.asyncio import AsyncSession
-import structlog
 
+import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import AuditAction, EventSeverity
 from app.models.audit_log import AuditLog
 from app.models.event import Event
-from app.core.enums import AuditAction, EventSeverity
 
 logger = structlog.get_logger()
 
@@ -55,12 +56,12 @@ async def record_audit(
     db: AsyncSession,
     *,
     action: AuditAction,
-    actor_user_id: Optional[UUID] = None,
-    target_user_id: Optional[UUID] = None,
-    target_account_id: Optional[UUID] = None,
-    payload: Optional[dict[str, Any]] = None,
-    ip_address: Optional[str] = None,
-    user_agent: Optional[str] = None,
+    actor_user_id: UUID | None = None,
+    target_user_id: UUID | None = None,
+    target_account_id: UUID | None = None,
+    payload: dict[str, Any] | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
     impersonating: bool = False,
     emit_event: bool = True,
 ) -> AuditLog:
@@ -104,11 +105,11 @@ async def emit_system_event(
     event_type: str,
     severity: EventSeverity,
     title: str,
-    message: Optional[str] = None,
-    user_id: Optional[UUID] = None,
-    account_id: Optional[UUID] = None,
-    basket_id: Optional[UUID] = None,
-    payload: Optional[dict[str, Any]] = None,
+    message: str | None = None,
+    user_id: UUID | None = None,
+    account_id: UUID | None = None,
+    basket_id: UUID | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> Event:
     """Emit a system event without an audit log entry."""
     event = Event(

@@ -1,22 +1,23 @@
 """Super-admin user management — promote, demote, hard-delete per §9."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, func, desc, and_
 
 from app.api.deps import get_db, require_admin, require_super_admin
-from app.core.rate_limit import get_client_ip
 from app.core.enums import AuditAction, Role
-from app.models.user import User
-from app.models.session import Session
+from app.core.rate_limit import get_client_ip
 from app.models.account import Account
-from app.models.basket import Basket
-from app.models.order import Order
-from app.models.audit_log import AuditLog
-from app.models.fee_transaction import FeeTransaction
 from app.models.affiliate_commission import AffiliateCommission
+from app.models.audit_log import AuditLog
+from app.models.basket import Basket
+from app.models.fee_transaction import FeeTransaction
+from app.models.order import Order
+from app.models.session import Session
+from app.models.user import User
 from app.models.user_subscription import UserSubscription
 from app.services.audit_service import record_audit
 
@@ -36,9 +37,7 @@ async def get_user_detail(
         raise HTTPException(status_code=404, detail="User not found")
 
     # --- Account stats ---
-    acc_result = await db.execute(
-        select(Account).where(Account.user_id == user_id)
-    )
+    acc_result = await db.execute(select(Account).where(Account.user_id == user_id))
     accounts = acc_result.scalars().all()
 
     # --- Basket/PnL stats ---
@@ -47,14 +46,20 @@ async def get_user_detail(
             func.count(Basket.id).label("total"),
             func.count(Basket.id).filter(Basket.status == "ACTIVE").label("active"),
             func.count(Basket.id).filter(Basket.status == "CLOSED").label("closed"),
-            func.coalesce(func.sum(Basket.realized_pnl).filter(Basket.status == "CLOSED"), 0).label("total_realized_pnl"),
-            func.coalesce(func.sum(Basket.fees_paid).filter(Basket.status == "CLOSED"), 0).label("total_fees_binance"),
-            func.count(Basket.id).filter(
-                Basket.status == "CLOSED", Basket.realized_pnl != None, Basket.realized_pnl > 0
-            ).label("winning"),
-            func.count(Basket.id).filter(
+            func.coalesce(func.sum(Basket.realized_pnl).filter(Basket.status == "CLOSED"), 0).label(
+                "total_realized_pnl"
+            ),
+            func.coalesce(func.sum(Basket.fees_paid).filter(Basket.status == "CLOSED"), 0).label(
+                "total_fees_binance"
+            ),
+            func.count(Basket.id)
+            .filter(Basket.status == "CLOSED", Basket.realized_pnl != None, Basket.realized_pnl > 0)
+            .label("winning"),
+            func.count(Basket.id)
+            .filter(
                 Basket.status == "CLOSED", Basket.realized_pnl != None, Basket.realized_pnl <= 0
-            ).label("losing"),
+            )
+            .label("losing"),
         ).where(Basket.user_id == user_id)
     )
     bs = basket_stats.one()
@@ -64,9 +69,7 @@ async def get_user_detail(
 
     # --- Session count ---
     session_result = await db.execute(
-        select(func.count(Session.id)).where(
-            Session.user_id == user_id, Session.revoked_at == None
-        )
+        select(func.count(Session.id)).where(Session.user_id == user_id, Session.revoked_at == None)
     )
     active_sessions = session_result.scalar() or 0
 
@@ -81,31 +84,23 @@ async def get_user_detail(
 
     # --- Total TG fees paid ---
     tg_fees_result = await db.execute(
-        select(
-            func.coalesce(func.sum(FeeTransaction.amount), 0)
-        ).where(
-            FeeTransaction.user_id == user_id,
-            FeeTransaction.type == "FEE_DEDUCTION"
+        select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
+            FeeTransaction.user_id == user_id, FeeTransaction.type == "FEE_DEDUCTION"
         )
     )
     total_tg_fees = abs(float(tg_fees_result.scalar() or 0))
 
     # --- Total deposits ---
     deposits_result = await db.execute(
-        select(
-            func.coalesce(func.sum(FeeTransaction.amount), 0)
-        ).where(
-            FeeTransaction.user_id == user_id,
-            FeeTransaction.type == "DEPOSIT"
+        select(func.coalesce(func.sum(FeeTransaction.amount), 0)).where(
+            FeeTransaction.user_id == user_id, FeeTransaction.type == "DEPOSIT"
         )
     )
     total_deposits = float(deposits_result.scalar() or 0)
 
     # --- Affiliate stats ---
     referral_count_result = await db.execute(
-        select(func.count()).where(
-            User.invited_by_id == user_id, User.deleted_at == None
-        )
+        select(func.count()).where(User.invited_by_id == user_id, User.deleted_at == None)
     )
     referral_count = referral_count_result.scalar() or 0
 
@@ -132,9 +127,9 @@ async def get_user_detail(
 
     # --- Referral list (users invited by this user) ---
     referrals_result = await db.execute(
-        select(User).where(
-            User.invited_by_id == user_id, User.deleted_at == None
-        ).order_by(User.created_at.desc())
+        select(User)
+        .where(User.invited_by_id == user_id, User.deleted_at == None)
+        .order_by(User.created_at.desc())
     )
     referrals = referrals_result.scalars().all()
 
@@ -148,14 +143,16 @@ async def get_user_detail(
             )
         )
         r_earned = float(r_earned_q.scalar() or 0)
-        referral_items.append({
-            "id": str(r.id),
-            "email": r.email,
-            "display_name": r.display_name,
-            "is_active": r.is_active,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-            "commission_earned": round(r_earned, 4),
-        })
+        referral_items.append(
+            {
+                "id": str(r.id),
+                "email": r.email,
+                "display_name": r.display_name,
+                "is_active": r.is_active,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "commission_earned": round(r_earned, 4),
+            }
+        )
 
     # --- Recent commission transactions (last 30) ---
     commission_result = await db.execute(
@@ -171,10 +168,13 @@ async def get_user_detail(
     comm_user_map = {}
     if comm_referral_ids:
         comm_users_r = await db.execute(select(User).where(User.id.in_(comm_referral_ids)))
-        comm_user_map = {u.id: {"email": u.email, "name": u.display_name} for u in comm_users_r.scalars().all()}
+        comm_user_map = {
+            u.id: {"email": u.email, "name": u.display_name} for u in comm_users_r.scalars().all()
+        }
 
     # --- Total withdrawn ---
     from app.models.affiliate_withdrawal import AffiliateWithdrawal
+
     withdrawn_result = await db.execute(
         select(func.coalesce(func.sum(AffiliateWithdrawal.amount), 0)).where(
             AffiliateWithdrawal.user_id == user_id,
@@ -205,8 +205,12 @@ async def get_user_detail(
             "plan_price": float(user_sub.plan.price_usd) if user_sub.plan else 0,
             "status": user_sub.status,
             "started_at": user_sub.started_at.isoformat() if user_sub.started_at else None,
-            "current_period_end": user_sub.current_period_end.isoformat() if user_sub.current_period_end else None,
-            "grace_period_end": user_sub.grace_period_end.isoformat() if user_sub.grace_period_end else None,
+            "current_period_end": user_sub.current_period_end.isoformat()
+            if user_sub.current_period_end
+            else None,
+            "grace_period_end": user_sub.grace_period_end.isoformat()
+            if user_sub.grace_period_end
+            else None,
             "cancel_at_period_end": user_sub.cancel_at_period_end,
             "cancelled_at": user_sub.cancelled_at.isoformat() if user_sub.cancelled_at else None,
         }
@@ -233,7 +237,9 @@ async def get_user_detail(
             "is_email_verified": user.is_email_verified,
             "totp_enabled": bool(user.totp_secret_encrypted),
             "twin_grid_balance": float(user.twin_grid_balance or 0),
-            "fee_percentage_override": float(user.fee_percentage_override) if user.fee_percentage_override else None,
+            "fee_percentage_override": float(user.fee_percentage_override)
+            if user.fee_percentage_override
+            else None,
             "invite_code": user.invite_code,
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
@@ -241,12 +247,16 @@ async def get_user_detail(
             "suspended_at": user.suspended_at.isoformat() if user.suspended_at else None,
             "suspended_reason": user.suspended_reason,
             "affiliate_balance": round(float(user.affiliate_balance or 0), 4),
-            "affiliate_commission_override": float(user.affiliate_commission_override) if user.affiliate_commission_override is not None else None,
+            "affiliate_commission_override": float(user.affiliate_commission_override)
+            if user.affiliate_commission_override is not None
+            else None,
             "invited_by": invited_by_info,
             # Telegram
             "telegram_chat_id": user.telegram_chat_id,
             "telegram_username": user.telegram_username,
-            "telegram_connected_at": user.telegram_connected_at.isoformat() if user.telegram_connected_at else None,
+            "telegram_connected_at": user.telegram_connected_at.isoformat()
+            if user.telegram_connected_at
+            else None,
             "telegram_notifications": user.telegram_notifications,
         },
         "stats": {
@@ -271,7 +281,9 @@ async def get_user_detail(
             "total_earned": round(total_affiliate_earned, 4),
             "total_withdrawn": round(total_withdrawn, 4),
             "pending_withdrawal": round(pending_withdrawal, 4),
-            "commission_override": float(user.affiliate_commission_override) if user.affiliate_commission_override is not None else None,
+            "commission_override": float(user.affiliate_commission_override)
+            if user.affiliate_commission_override is not None
+            else None,
             "invite_code": user.invite_code,
             "invited_by": invited_by_info,
             "referral_count": referral_count,
@@ -338,8 +350,10 @@ async def promote_to_admin(
     user.role = Role.ADMIN.value
 
     await record_audit(
-        db, action=AuditAction.USER_PROMOTED,
-        actor_user_id=admin.id, target_user_id=user_id,
+        db,
+        action=AuditAction.USER_PROMOTED,
+        actor_user_id=admin.id,
+        target_user_id=user_id,
         payload={"old_role": old_role, "new_role": Role.ADMIN.value},
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -363,7 +377,9 @@ async def demote_to_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     if user.role != Role.ADMIN.value:
-        raise HTTPException(status_code=400, detail=f"Can only demote ADMIN role, user has: {user.role}")
+        raise HTTPException(
+            status_code=400, detail=f"Can only demote ADMIN role, user has: {user.role}"
+        )
 
     if user.id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot demote yourself")
@@ -372,8 +388,10 @@ async def demote_to_user(
     user.role = Role.USER.value
 
     await record_audit(
-        db, action=AuditAction.USER_DEMOTED,
-        actor_user_id=admin.id, target_user_id=user_id,
+        db,
+        action=AuditAction.USER_DEMOTED,
+        actor_user_id=admin.id,
+        target_user_id=user_id,
         payload={"old_role": old_role, "new_role": Role.USER.value},
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -406,8 +424,10 @@ async def hard_delete_user(
 
     # Record audit BEFORE deletion (retain with PII redacted)
     await record_audit(
-        db, action=AuditAction.USER_HARD_DELETED,
-        actor_user_id=admin.id, target_user_id=user_id,
+        db,
+        action=AuditAction.USER_HARD_DELETED,
+        actor_user_id=admin.id,
+        target_user_id=user_id,
         payload={"deleted_email_hash": str(hash(user_email))},
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -419,17 +439,19 @@ async def hard_delete_user(
     await db.execute(delete(Account).where(Account.user_id == user_id))
     await db.execute(delete(Session).where(Session.user_id == user_id))
 
-    from app.models.workspace_member import WorkspaceMember
     from app.models.workspace import Workspace
+    from app.models.workspace_member import WorkspaceMember
+
     await db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == user_id))
     await db.execute(delete(Workspace).where(Workspace.owner_id == user_id))
 
     # Redact PII in audit logs but keep the log entries
     from sqlalchemy import update
+
     await db.execute(
-        update(AuditLog).where(
-            (AuditLog.actor_user_id == user_id) | (AuditLog.target_user_id == user_id)
-        ).values(ip_address=None, user_agent=None)
+        update(AuditLog)
+        .where((AuditLog.actor_user_id == user_id) | (AuditLog.target_user_id == user_id))
+        .values(ip_address=None, user_agent=None)
     )
 
     await db.delete(user)
@@ -460,11 +482,15 @@ async def suspend_user(
     if user.suspended_at:
         raise HTTPException(status_code=400, detail="User is already suspended")
 
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    body = (
+        await request.json()
+        if request.headers.get("content-type", "").startswith("application/json")
+        else {}
+    )
     reason = body.get("reason", "Suspended by admin")
 
     user.is_active = False
-    user.suspended_at = datetime.now(timezone.utc)
+    user.suspended_at = datetime.now(UTC)
     user.suspended_reason = reason
     user.suspended_by = admin.id
 
@@ -472,8 +498,10 @@ async def suspend_user(
     await db.execute(delete(Session).where(Session.user_id == user_id))
 
     await record_audit(
-        db, action=AuditAction.USER_SUSPENDED,
-        actor_user_id=admin.id, target_user_id=user_id,
+        db,
+        action=AuditAction.USER_SUSPENDED,
+        actor_user_id=admin.id,
+        target_user_id=user_id,
         payload={"reason": reason},
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -483,6 +511,7 @@ async def suspend_user(
     # Send suspension email
     try:
         from app.services.notification_service import notification_service
+
         await notification_service.notify_suspended(user.email, reason)
     except Exception:
         pass
@@ -512,8 +541,10 @@ async def unsuspend_user(
     user.suspended_by = None
 
     await record_audit(
-        db, action=AuditAction.USER_UNSUSPENDED,
-        actor_user_id=admin.id, target_user_id=user_id,
+        db,
+        action=AuditAction.USER_UNSUSPENDED,
+        actor_user_id=admin.id,
+        target_user_id=user_id,
         payload={},
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -523,6 +554,7 @@ async def unsuspend_user(
     # Send unsuspension email
     try:
         from app.services.notification_service import notification_service
+
         await notification_service.notify_unsuspended(user.email)
     except Exception:
         pass

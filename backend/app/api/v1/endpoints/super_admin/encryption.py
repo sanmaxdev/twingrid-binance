@@ -1,25 +1,26 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from cryptography.fernet import Fernet
 
-from app.core.database import get_db
+from cryptography.fernet import Fernet
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.api.deps import get_current_user
-from app.models.user import User
+from app.core.database import get_db
+from app.core.enums import Role
+from app.core.security import decrypt_secret, decrypt_totp_secret
 from app.models.account import Account
 from app.models.audit_log import AuditLog
-from app.core.enums import Role
-from app.core.security import decrypt_secret, encrypt_secret, decrypt_totp_secret
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
 @router.post("/rotate-encryption-key")
 async def rotate_encryption_key(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
     if current_user.role != Role.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Only super admins can rotate encryption keys")
@@ -62,7 +63,9 @@ async def rotate_encryption_key(
         audit = AuditLog(
             actor_user_id=current_user.id,
             action="ENCRYPTION_KEY_ROTATED",
-            payload={"message": f"Rotated keys for {rotated_users} users and {rotated_accounts} accounts"}
+            payload={
+                "message": f"Rotated keys for {rotated_users} users and {rotated_accounts} accounts"
+            },
         )
         db.add(audit)
 
@@ -71,9 +74,9 @@ async def rotate_encryption_key(
         return {
             "status": "success",
             "new_key": new_key.decode(),
-            "message": f"Encryption keys rotated successfully. Rotated {rotated_users} user secrets and {rotated_accounts} account credentials. IMPORTANT: Update MASTER_ENCRYPTION_KEY in your .env file with the new key and restart all services."
+            "message": f"Encryption keys rotated successfully. Rotated {rotated_users} user secrets and {rotated_accounts} account credentials. IMPORTANT: Update MASTER_ENCRYPTION_KEY in your .env file with the new key and restart all services.",
         }
-    except Exception as e:
+    except Exception:
         await db.rollback()
         logger.exception("Failed to rotate encryption keys")
-        raise HTTPException(status_code=500, detail="Key rotation failed")
+        raise HTTPException(status_code=500, detail="Key rotation failed") from None

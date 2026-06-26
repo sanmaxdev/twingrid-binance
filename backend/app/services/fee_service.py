@@ -1,24 +1,25 @@
 """Fee engine — core business logic for Twin Grid profit-share fees."""
 
-import structlog
 from decimal import Decimal
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 
-from app.models.user import User
-from app.models.account import Account
-from app.models.settings import AccountSettings
+import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import FeeTransactionType
 from app.models.fee_transaction import FeeTransaction
 from app.models.platform_settings import PlatformSettings
-from app.models.user_subscription import UserSubscription
+from app.models.settings import AccountSettings
 from app.models.subscription_plan import SubscriptionPlan
-from app.core.enums import FeeTransactionType
+from app.models.user import User
+from app.models.user_subscription import UserSubscription
 
 logger = structlog.get_logger(__name__)
 
 
 class RiskCheckResult:
     """Result of a balance gate check."""
+
     def __init__(self, passed: bool, reason: str = ""):
         self.passed = passed
         self.reason = reason
@@ -26,9 +27,7 @@ class RiskCheckResult:
 
 async def get_fee_setting(db: AsyncSession, key: str, default=None):
     """Read a fee-related platform setting."""
-    result = await db.execute(
-        select(PlatformSettings).where(PlatformSettings.key == key)
-    )
+    result = await db.execute(select(PlatformSettings).where(PlatformSettings.key == key))
     setting = result.scalar_one_or_none()
     if not setting:
         return default
@@ -87,9 +86,7 @@ async def get_min_balance_multiplier(db: AsyncSession) -> Decimal:
     return Decimal(str(val))
 
 
-async def calculate_minimum_balance(
-    db: AsyncSession, user_id, account_id
-) -> Decimal:
+async def calculate_minimum_balance(db: AsyncSession, user_id, account_id) -> Decimal:
     """
     Calculate min required Twin Grid Balance before opening a new basket.
 
@@ -120,6 +117,7 @@ async def calculate_minimum_balance(
     # Try to get the real wallet balance from the latest equity snapshot
     try:
         from app.models.equity_snapshot import EquitySnapshot
+
         snap_result = await db.execute(
             select(EquitySnapshot.wallet_balance)
             .where(EquitySnapshot.account_id == account_id)
@@ -162,9 +160,7 @@ async def calculate_minimum_balance(
     return max(minimum, Decimal("0.50"))
 
 
-async def check_balance_gate(
-    db: AsyncSession, user_id, account_id
-) -> RiskCheckResult:
+async def check_balance_gate(db: AsyncSession, user_id, account_id) -> RiskCheckResult:
     """
     Pre-trade balance check. Returns pass/fail.
     Called before _evaluate_entry() in grid_bot.
@@ -185,7 +181,7 @@ async def check_balance_gate(
         return RiskCheckResult(
             False,
             f"Insufficient Twin Grid Balance: ${balance:.2f} < minimum ${minimum:.2f}. "
-            f"Please deposit to continue trading."
+            f"Please deposit to continue trading.",
         )
 
     return RiskCheckResult(True)
@@ -226,15 +222,15 @@ async def deduct_fee(
     # ── Duplicate prevention: only one fee per basket ──
     if basket_id:
         existing = await db.execute(
-            select(FeeTransaction.id).where(
+            select(FeeTransaction.id)
+            .where(
                 FeeTransaction.basket_id == basket_id,
                 FeeTransaction.type == FeeTransactionType.FEE_DEDUCTION,
-            ).limit(1)
+            )
+            .limit(1)
         )
         if existing.scalar_one_or_none():
-            logger.warning(
-                f"⚠️ Fee already deducted for basket {basket_id}. Skipping duplicate."
-            )
+            logger.warning(f"⚠️ Fee already deducted for basket {basket_id}. Skipping duplicate.")
             return None
 
     fee_pct = await get_fee_percentage(db, user_id)
@@ -283,15 +279,20 @@ async def deduct_fee(
     # Send fee + low balance email (non-blocking)
     try:
         from app.services.notification_service import notification_service
+
         await notification_service.notify_fee_deducted(
             user.email,
-            f"{fee_amount:.4f}", f"{fee_pct}",
-            f"${realized_pnl:.4f}", f"${balance_after:.2f}",
+            f"{fee_amount:.4f}",
+            f"{fee_pct}",
+            f"${realized_pnl:.4f}",
+            f"${balance_after:.2f}",
             user_id=user_id,
         )
         if balance_after < 10:
             await notification_service.notify_low_balance(
-                user.email, f"${balance_after:.2f}", "$10.00",
+                user.email,
+                f"${balance_after:.2f}",
+                "$10.00",
                 user_id=user_id,
             )
     except Exception:
@@ -312,6 +313,7 @@ async def _credit_affiliate_commission(
 
     # Check if affiliate system is enabled
     from app.models.platform_settings import PlatformSettings
+
     setting = await db.execute(
         select(PlatformSettings).where(PlatformSettings.key == "affiliate_config")
     )
@@ -361,6 +363,7 @@ async def _credit_affiliate_commission(
 
     # Create affiliate commission record
     from app.models.affiliate_commission import AffiliateCommission
+
     ac = AffiliateCommission(
         referrer_id=referrer.id,
         referral_id=referral_user.id,
@@ -378,9 +381,7 @@ async def _credit_affiliate_commission(
     )
 
 
-async def credit_deposit(
-    db: AsyncSession, user_id, amount: float, admin_id=None
-) -> FeeTransaction:
+async def credit_deposit(db: AsyncSession, user_id, amount: float, admin_id=None) -> FeeTransaction:
     """Credit a deposit to user's Twin Grid Balance."""
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -410,8 +411,11 @@ async def credit_deposit(
     # Send deposit email (non-blocking)
     try:
         from app.services.notification_service import notification_service
+
         await notification_service.notify_deposit_credited(
-            user.email, f"{amount:.2f}", f"${balance_after:.2f}",
+            user.email,
+            f"{amount:.2f}",
+            f"${balance_after:.2f}",
             user_id=user_id,
         )
     except Exception:

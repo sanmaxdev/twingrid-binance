@@ -2,16 +2,17 @@
 
 import logging
 import random
-from typing import Optional
 from collections import deque
-from datetime import datetime, timezone
-import httpx
+from datetime import UTC, datetime
 from email.message import EmailMessage
+
 import aiosmtplib
+import httpx
 
 from app.core.config import settings
 from app.core.email_templates import (
-    welcome_email, password_reset_email,
+    password_reset_email,
+    welcome_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,12 +42,14 @@ async def send_email(to_email: str, subject: str, html_content: str) -> bool:
         logger.warning(f"No email provider configured. Would have sent to {to_email}: {subject}")
 
     # Keep in-memory cache
-    email_log.append({
-        "to": to_email,
-        "subject": subject,
-        "status": "sent" if success else "failed",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    email_log.append(
+        {
+            "to": to_email,
+            "subject": subject,
+            "status": "sent" if success else "failed",
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+    )
 
     # Persist to database
     try:
@@ -62,6 +65,7 @@ async def _persist_email_log(to_email: str, subject: str, status: str, error: st
     try:
         from app.core.database import AsyncSessionLocal
         from app.models.email_log import EmailLog
+
         async with AsyncSessionLocal() as session:
             log_entry = EmailLog(
                 to_email=to_email,
@@ -96,9 +100,7 @@ async def _send_via_resend(to_email: str, subject: str, html_content: str) -> bo
                 logger.info(f"✉️ Email sent via Resend to {to_email}: {subject}")
                 return True
             else:
-                logger.error(
-                    f"Resend API error {response.status_code}: {response.text}"
-                )
+                logger.error(f"Resend API error {response.status_code}: {response.text}")
                 return False
     except Exception as e:
         logger.error(f"Failed to send email via Resend to {to_email}: {e}")
@@ -131,6 +133,7 @@ async def _send_via_smtp(to_email: str, subject: str, html_content: str) -> bool
 
 
 # ── Convenience Functions ──
+
 
 async def send_verification_email(to_email: str, otp: str, display_name: str = ""):
     subject, html = welcome_email(display_name or to_email.split("@")[0], otp)

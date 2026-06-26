@@ -1,11 +1,12 @@
-import httpx
+import asyncio
 import hashlib
 import hmac
-import time
-import asyncio
 import logging
+import time
 from typing import Any
 from urllib.parse import urlencode
+
+import httpx
 
 from app.core.config import settings
 
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Per-API-key weight tracking (shared across calls within the same worker process)
 _api_weight_cache: dict[str, int] = {}
+
 
 class BinanceClient:
     def __init__(self, api_key: str, api_secret: str, is_testnet: bool = False):
@@ -61,7 +63,7 @@ class BinanceClient:
         endpoint = "/fapi/v1/listenKey"
         headers = {"X-MBX-APIKEY": self.api_key}
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.delete(
+            await client.delete(
                 f"{self.base_url}{endpoint}",
                 headers=headers,
                 params={"listenKey": listen_key},
@@ -70,9 +72,7 @@ class BinanceClient:
 
     def _generate_signature(self, query_string: str) -> str:
         return hmac.new(
-            self.api_secret.encode('utf-8'),
-            query_string.encode('utf-8'),
-            hashlib.sha256
+            self.api_secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256
         ).hexdigest()
 
     async def verify_credentials(self) -> dict:
@@ -108,9 +108,17 @@ class BinanceClient:
                             continue
 
                         if response.status_code != 200:
-                            error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {"msg": response.text}
+                            error_data = (
+                                response.json()
+                                if response.headers.get("content-type", "").startswith(
+                                    "application/json"
+                                )
+                                else {"msg": response.text}
+                            )
                             error_msg = error_data.get("msg", response.text)
-                            raise ValueError(f"Binance API error ({response.status_code}): {error_msg}")
+                            raise ValueError(
+                                f"Binance API error ({response.status_code}): {error_msg}"
+                            )
 
                         data = response.json()
 
@@ -139,7 +147,9 @@ class BinanceClient:
                     last_error = str(e)
                     continue
 
-        raise ValueError(f"Failed to verify credentials with Binance API. {last_error or 'All endpoints returned errors.'}")
+        raise ValueError(
+            f"Failed to verify credentials with Binance API. {last_error or 'All endpoints returned errors.'}"
+        )
 
     async def get_account_info(self) -> dict:
         return await self._signed_get("/fapi/v2/account")
@@ -163,7 +173,9 @@ class BinanceClient:
             return float(response.json()["price"])
 
     async def set_leverage(self, symbol: str, leverage: int) -> dict:
-        return await self._signed_post("/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})
+        return await self._signed_post(
+            "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage}
+        )
 
     async def set_margin_type(self, symbol: str, margin_type: str) -> dict:
         # Binance API expects CROSSED, not CROSS
@@ -171,27 +183,48 @@ class BinanceClient:
         if mt == "CROSS":
             mt = "CROSSED"
         try:
-            return await self._signed_post("/fapi/v1/marginType", {"symbol": symbol, "marginType": mt})
+            return await self._signed_post(
+                "/fapi/v1/marginType", {"symbol": symbol, "marginType": mt}
+            )
         except ValueError as e:
             if "No need to change margin type" in str(e):
                 return {"msg": "Already set"}
             raise
 
-    async def place_market_order(self, symbol: str, side: str, quantity: float, reduce_only: bool = False) -> dict:
+    async def place_market_order(
+        self, symbol: str, side: str, quantity: float, reduce_only: bool = False
+    ) -> dict:
         params = {"symbol": symbol, "side": side, "type": "MARKET", "quantity": quantity}
         if reduce_only:
             params["reduceOnly"] = "true"
         return await self._signed_post("/fapi/v1/order", params)
 
-    async def place_limit_order(self, symbol: str, side: str, quantity: float, price: float, reduce_only: bool = False, client_order_id: str = None) -> dict:
-        params = {"symbol": symbol, "side": side, "type": "LIMIT", "quantity": quantity, "price": price, "timeInForce": "GTC"}
+    async def place_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float,
+        reduce_only: bool = False,
+        client_order_id: str = None,
+    ) -> dict:
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": "LIMIT",
+            "quantity": quantity,
+            "price": price,
+            "timeInForce": "GTC",
+        }
         if reduce_only:
             params["reduceOnly"] = "true"
         if client_order_id:
             params["newClientOrderId"] = client_order_id
         return await self._signed_post("/fapi/v1/order", params)
 
-    async def cancel_order(self, symbol: str, order_id: int = None, client_order_id: str = None) -> dict:
+    async def cancel_order(
+        self, symbol: str, order_id: int = None, client_order_id: str = None
+    ) -> dict:
         params = {"symbol": symbol}
         if order_id:
             params["orderId"] = order_id
@@ -210,9 +243,7 @@ class BinanceClient:
 
     async def get_order(self, symbol: str, order_id: int) -> dict:
         """Query a specific order to get fill details (executedQty, avgPrice, cumQuote, status)."""
-        return await self._signed_get("/fapi/v1/order", {
-            "symbol": symbol, "orderId": order_id
-        })
+        return await self._signed_get("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
 
     async def get_position_info(self, symbol: str = None) -> list:
         params = {}
@@ -231,11 +262,16 @@ class BinanceClient:
 
     async def get_all_orders(self, symbol: str, limit: int = 50) -> list:
         """Get all orders (open + closed) for forensic analysis."""
-        return await self._signed_get("/fapi/v1/allOrders", {
-            "symbol": symbol, "limit": limit
-        })
+        return await self._signed_get("/fapi/v1/allOrders", {"symbol": symbol, "limit": limit})
 
-    async def get_income_history(self, income_type: str = None, symbol: str = None, start_time: int = None, end_time: int = None, limit: int = 1000) -> list:
+    async def get_income_history(
+        self,
+        income_type: str = None,
+        symbol: str = None,
+        start_time: int = None,
+        end_time: int = None,
+        limit: int = 1000,
+    ) -> list:
         params = {"limit": limit}
         if income_type:
             params["incomeType"] = income_type
@@ -279,7 +315,9 @@ class BinanceClient:
 
     def _track_api_weight(self, response: httpx.Response):
         """Parse X-MBX-USED-WEIGHT header and track API consumption."""
-        weight_str = response.headers.get("X-MBX-USED-WEIGHT-1M", "") or response.headers.get("X-MBX-USED-WEIGHT", "")
+        weight_str = response.headers.get("X-MBX-USED-WEIGHT-1M", "") or response.headers.get(
+            "X-MBX-USED-WEIGHT", ""
+        )
         if weight_str:
             try:
                 weight = int(weight_str)

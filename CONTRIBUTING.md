@@ -100,8 +100,8 @@ ruff format app          # format
 mypy app                 # type check
 ```
 
-> **Note:** Linting is currently a **non-blocking** CI check while the codebase adopts these
-> standards. New and changed code should be ruff-clean — please don't introduce new violations.
+> **Note:** `ruff check` and `ruff format --check` run in CI and must pass. Keep new and
+> changed code ruff-clean and formatted.
 
 ### Frontend (TypeScript / React)
 

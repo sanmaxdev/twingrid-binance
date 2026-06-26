@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { ArrowLeft, Mail, MessageSquare, Send } from "lucide-react";
 import { motion } from "framer-motion";
+import { SUPPORT_EMAIL } from "@/lib/site";
 
 export default function ContactPage() {
   return (
@@ -50,8 +51,8 @@ export default function ContactPage() {
                 </div>
                 <div>
                   <div className="text-sm text-[#848E9C] font-semibold mb-1 uppercase tracking-wider">Email Support</div>
-                  <a href="mailto:help@twingridbot.com" className="text-lg font-medium text-[#EAECEF] hover:text-[#F0B90B] transition-colors">
-                    help@twingridbot.com
+                  <a href={`mailto:${SUPPORT_EMAIL}`} className="text-lg font-medium text-[#EAECEF] hover:text-[#F0B90B] transition-colors">
+                    {SUPPORT_EMAIL}
                   </a>
                   <p className="text-sm text-[#5E6673] mt-1">24/7 technical and billing support.</p>
                 </div>

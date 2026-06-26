@@ -14,20 +14,19 @@ Architecture:
 import asyncio
 import json
 import time
+
+import redis.asyncio as aioredis
 import structlog
 import websockets
-from datetime import datetime, timezone
-from typing import Dict, Optional
-
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
-from app.core.security import decrypt_secret
-from app.core.redis_client import redis_client
-from app.models.account import Account
 from app.core.enums import AccountStatus
+from app.core.redis_client import redis_client
+from app.core.security import decrypt_secret
+from app.models.account import Account
 from app.services.binance_client import BinanceClient
 
 logger = structlog.get_logger(__name__)
@@ -40,8 +39,6 @@ SNAPSHOT_INTERVAL = 60
 
 
 # ─── Redis Cache Helper (used by GridBotService, equity_task, dashboards) ───
-
-import redis.asyncio as aioredis
 
 
 async def _get_redis():
@@ -65,7 +62,7 @@ class WSCache:
     """Read interface for WebSocket-cached Binance data stored in Redis."""
 
     @staticmethod
-    async def _read_key(key: str) -> Optional[str]:
+    async def _read_key(key: str) -> str | None:
         """Read a single Redis key, auto-healing broken connections."""
         client, is_temp = await _get_redis()
         try:
@@ -75,7 +72,7 @@ class WSCache:
                 await client.aclose()
 
     @staticmethod
-    async def get_positions(account_id: str, symbol: str = None) -> Optional[list]:
+    async def get_positions(account_id: str, symbol: str = None) -> list | None:
         """Get cached positions for an account. Returns None on cache miss."""
         try:
             raw = await WSCache._read_key(f"ws:account:{account_id}:positions")
@@ -90,7 +87,7 @@ class WSCache:
             return None
 
     @staticmethod
-    async def get_balances(account_id: str) -> Optional[list]:
+    async def get_balances(account_id: str) -> list | None:
         """Get cached balances for an account. Returns None on cache miss."""
         try:
             raw = await WSCache._read_key(f"ws:account:{account_id}:balances")
@@ -102,7 +99,7 @@ class WSCache:
             return None
 
     @staticmethod
-    async def get_open_orders(account_id: str, symbol: str = None) -> Optional[list]:
+    async def get_open_orders(account_id: str, symbol: str = None) -> list | None:
         """Get cached open orders for an account. Returns None on cache miss."""
         try:
             raw = await WSCache._read_key(f"ws:account:{account_id}:open_orders")
@@ -114,11 +111,11 @@ class WSCache:
                 orders = [o for o in orders if o.get("symbol") == symbol]
             return orders
         except Exception as e:
-            logger.debug(f"Cache miss for open_orders (account={account_id}): {e}")            
+            logger.debug(f"Cache miss for open_orders (account={account_id}): {e}")
             return None
 
     @staticmethod
-    async def get_account_info(account_id: str) -> Optional[dict]:
+    async def get_account_info(account_id: str) -> dict | None:
         """Get cached account_info (totalWalletBalance, totalUnrealizedProfit,
         availableBalance, totalMarginBalance) for an account.
         Returns None on cache miss."""
@@ -137,21 +134,19 @@ ws_cache = WSCache()
 
 # ─── Per-Account WebSocket Stream ───
 
+
 class BinanceUserStream:
     """Manages a single Binance WebSocket User Data Stream for one account."""
 
-    def __init__(self, account_id: str, api_key: str, api_secret: str,
-                 is_testnet: bool):
+    def __init__(self, account_id: str, api_key: str, api_secret: str, is_testnet: bool):
         self.account_id = account_id
-        self.client = BinanceClient(
-            api_key=api_key, api_secret=api_secret, is_testnet=is_testnet
-        )
-        self.listen_key: Optional[str] = None
+        self.client = BinanceClient(api_key=api_key, api_secret=api_secret, is_testnet=is_testnet)
+        self.listen_key: str | None = None
         self._running = False
         self._ws = None
-        self._keepalive_task: Optional[asyncio.Task] = None
-        self._reconnect_task: Optional[asyncio.Task] = None
-        self._snapshot_task: Optional[asyncio.Task] = None
+        self._keepalive_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._snapshot_task: asyncio.Task | None = None
 
     async def start(self):
         """Start the WebSocket stream with auto-reconnect."""
@@ -186,9 +181,7 @@ class BinanceUserStream:
         # Clean up Redis cache
         for key_suffix in ["positions", "balances", "open_orders", "last_event"]:
             try:
-                await redis_client.delete(
-                    f"ws:account:{self.account_id}:{key_suffix}"
-                )
+                await redis_client.delete(f"ws:account:{self.account_id}:{key_suffix}")
             except Exception:
                 pass
         logger.info("ws_stream_stopped", account_id=self.account_id)
@@ -216,7 +209,6 @@ class BinanceUserStream:
         ws_url = f"{self.client.ws_base_url}/ws/{self.listen_key}"
         logger.info("ws_connecting", account_id=self.account_id, url=ws_url[:60] + "...")
 
-        connect_timeout = 15
         # 24-hour max connection limit — reconnect at 23 hours
         max_connection_secs = 23 * 3600
 
@@ -379,6 +371,7 @@ class BinanceUserStream:
         even when no Binance WS events are firing (which only happen on
         actual account changes like trades)."""
         import random
+
         # Stagger start: each account waits a random 0-15s offset so
         # multiple accounts don't all hit Binance REST at the same instant
         await asyncio.sleep(random.uniform(2, 15))
@@ -443,29 +436,30 @@ class BinanceUserStream:
                     )
 
                     # Filter to only non-zero positions before publishing
-                    active_positions = [
-                        p for p in positions
-                        if float(p.get("positionAmt", 0)) != 0
-                    ]
+                    active_positions = [p for p in positions if float(p.get("positionAmt", 0)) != 0]
 
                     # Publish snapshot to Redis pub/sub for frontend live updates
                     await redis_client.publish(
                         f"ws:live:{self.account_id}",
-                        json.dumps({
-                            "type": "account_update",
-                            "account_id": self.account_id,
-                            "totalWalletBalance": total_wallet_balance,
-                            "totalUnrealizedProfit": total_unrealized_pnl,
-                            "availableBalance": available_balance,
-                            "positions": active_positions,
-                        }),
+                        json.dumps(
+                            {
+                                "type": "account_update",
+                                "account_id": self.account_id,
+                                "totalWalletBalance": total_wallet_balance,
+                                "totalUnrealizedProfit": total_unrealized_pnl,
+                                "availableBalance": available_balance,
+                                "positions": active_positions,
+                            }
+                        ),
                     )
 
                     logger.debug(
                         "ws_snapshot_published",
                         account_id=self.account_id,
                         balances=len(balances),
-                        positions=len([p for p in positions if float(p.get('positionAmt', 0)) != 0]),
+                        positions=len(
+                            [p for p in positions if float(p.get("positionAmt", 0)) != 0]
+                        ),
                     )
                 except Exception as e:
                     logger.debug(
@@ -526,9 +520,7 @@ class BinanceUserStream:
                 return
 
             # Read current open orders cache
-            raw = await redis_client.get(
-                f"ws:account:{self.account_id}:open_orders"
-            )
+            raw = await redis_client.get(f"ws:account:{self.account_id}:open_orders")
             orders_dict = json.loads(raw) if raw else {}
 
             if order_status in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
@@ -573,11 +565,13 @@ class BinanceUserStream:
             # Publish to Redis pub/sub for frontend live updates
             await redis_client.publish(
                 f"ws:live:{self.account_id}",
-                json.dumps({
-                    "type": "order_update",
-                    "account_id": self.account_id,
-                    "open_orders": list(orders_dict.values()),
-                }),
+                json.dumps(
+                    {
+                        "type": "order_update",
+                        "account_id": self.account_id,
+                        "open_orders": list(orders_dict.values()),
+                    }
+                ),
             )
 
         except Exception as e:
@@ -596,9 +590,7 @@ class BinanceUserStream:
             balances_raw = update_data.get("B", [])
             if balances_raw:
                 # Merge with existing cache (WS only sends changed assets)
-                raw = await redis_client.get(
-                    f"ws:account:{self.account_id}:balances"
-                )
+                raw = await redis_client.get(f"ws:account:{self.account_id}:balances")
                 existing = json.loads(raw) if raw else []
                 existing_map = {b["asset"]: b for b in existing if "asset" in b}
 
@@ -622,9 +614,7 @@ class BinanceUserStream:
             # Update positions
             positions_raw = update_data.get("P", [])
             if positions_raw:
-                raw = await redis_client.get(
-                    f"ws:account:{self.account_id}:positions"
-                )
+                raw = await redis_client.get(f"ws:account:{self.account_id}:positions")
                 existing = json.loads(raw) if raw else []
                 existing_map = {}
                 for p in existing:
@@ -641,7 +631,9 @@ class BinanceUserStream:
                         "symbol": symbol,
                         "positionAmt": ws_pos.get("pa", "0"),
                         "entryPrice": ws_pos.get("ep", "0"),
-                        "markPrice": ws_pos.get("mp", "0") if "mp" in ws_pos else prev.get("markPrice", "0"),
+                        "markPrice": ws_pos.get("mp", "0")
+                        if "mp" in ws_pos
+                        else prev.get("markPrice", "0"),
                         "unRealizedProfit": ws_pos.get("up", "0"),
                         "positionSide": pos_side,
                         "marginType": ws_pos.get("mt", "cross"),
@@ -668,19 +660,18 @@ class BinanceUserStream:
 
             # Filter to only non-zero positions
             all_positions = json.loads(pos_raw) if pos_raw else []
-            active_positions = [
-                p for p in all_positions
-                if float(p.get("positionAmt", 0)) != 0
-            ]
+            active_positions = [p for p in all_positions if float(p.get("positionAmt", 0)) != 0]
 
             await redis_client.publish(
                 f"ws:live:{self.account_id}",
-                json.dumps({
-                    "type": "account_update",
-                    "account_id": self.account_id,
-                    "balances": json.loads(bal_raw) if bal_raw else [],
-                    "positions": active_positions,
-                }),
+                json.dumps(
+                    {
+                        "type": "account_update",
+                        "account_id": self.account_id,
+                        "balances": json.loads(bal_raw) if bal_raw else [],
+                        "positions": active_positions,
+                    }
+                ),
             )
 
             logger.debug(
@@ -708,11 +699,12 @@ class BinanceUserStream:
 
 # ─── WebSocket Manager (manages all account streams) ───
 
+
 class BinanceWSManager:
     """Manages WebSocket User Data Streams for all active accounts."""
 
     def __init__(self):
-        self.streams: Dict[str, BinanceUserStream] = {}
+        self.streams: dict[str, BinanceUserStream] = {}
         self._running = False
 
     async def run_forever(self):
@@ -742,7 +734,7 @@ class BinanceWSManager:
     async def _sync_streams(self):
         """Compare active accounts in DB with running streams.
         Start streams for new accounts, stop streams for removed ones."""
-        if not hasattr(self, '_db_engine') or self._db_engine is None:
+        if not hasattr(self, "_db_engine") or self._db_engine is None:
             self._db_engine = create_async_engine(
                 settings.DATABASE_URL,
                 echo=False,
@@ -781,9 +773,7 @@ class BinanceWSManager:
                         )
                         self.streams[account_id] = stream
                         # Run stream in background task
-                        asyncio.create_task(
-                            self._run_stream(account_id, stream)
-                        )
+                        asyncio.create_task(self._run_stream(account_id, stream))
                         logger.info(
                             "ws_stream_started",
                             account_id=account_id,

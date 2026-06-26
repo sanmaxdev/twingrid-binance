@@ -16,8 +16,9 @@ Usage:
     # → {"direction": "BULLISH", "allow_long": True, "allow_short": False, ...}
 """
 
+from typing import Any
+
 import pandas as pd
-from typing import Dict, List, Any
 
 
 def detect_trend(
@@ -80,9 +81,9 @@ def detect_trend(
 
 
 def evaluate_trend_filter(
-    trends: Dict[str, str],
+    trends: dict[str, str],
     mode: str = "majority",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Combine multi-timeframe trend signals into a directional filter.
 

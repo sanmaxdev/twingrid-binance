@@ -1,27 +1,49 @@
-from pydantic import BaseModel, Field, model_validator
-from uuid import UUID
 from datetime import datetime
-from typing import Optional, Any, Literal
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, Field, model_validator
 
 from app.core.enums import AccountStatus
 
-
 # Allowed config keys for strategy settings (whitelist approach)
 ALLOWED_CONFIG_KEYS = {
-    "active_symbol", "active_symbols", "margin_type", "margin_mode", "leverage",
-    "sizing_mode", "base_order_usd", "base_order_pct",
-    "compounding_enabled", "compounding_pct", "initial_capital",
-    "max_safety_orders", "take_profit_pct", "tp_mode", "tp_fixed_amount",
-    "volume_scale", "step_scale",
-    "rsi_long_threshold", "rsi_short_threshold", "signal_threshold",
-    "allow_long", "allow_short",
+    "active_symbol",
+    "active_symbols",
+    "margin_type",
+    "margin_mode",
+    "leverage",
+    "sizing_mode",
+    "base_order_usd",
+    "base_order_pct",
+    "compounding_enabled",
+    "compounding_pct",
+    "initial_capital",
+    "max_safety_orders",
+    "take_profit_pct",
+    "tp_mode",
+    "tp_fixed_amount",
+    "volume_scale",
+    "step_scale",
+    "rsi_long_threshold",
+    "rsi_short_threshold",
+    "signal_threshold",
+    "allow_long",
+    "allow_short",
     "max_basket_age_hours",
-    "trend_filter_enabled", "trend_timeframes", "trend_mode",
-    "trend_ema_fast", "trend_ema_slow",
+    "trend_filter_enabled",
+    "trend_timeframes",
+    "trend_mode",
+    "trend_ema_fast",
+    "trend_ema_slow",
     # Risk controller
-    "risk_controller_enabled", "rc_max_so_trigger",
-    "rc_margin_usage_pct", "rc_max_basket_loss_pct",
-    "rc_max_basket_loss_usd", "rc_loss_mode", "rc_loss_direction",
+    "risk_controller_enabled",
+    "rc_max_so_trigger",
+    "rc_margin_usage_pct",
+    "rc_max_basket_loss_pct",
+    "rc_max_basket_loss_usd",
+    "rc_loss_mode",
+    "rc_loss_direction",
     "rc_margin_guard_enabled",
 }
 
@@ -38,9 +60,9 @@ class AccountCreate(AccountBase):
 
 
 class AccountUpdate(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=255)
-    api_key: Optional[str] = Field(None, min_length=10, max_length=256)
-    api_secret: Optional[str] = Field(None, min_length=10, max_length=256)
+    name: str | None = Field(None, min_length=1, max_length=255)
+    api_key: str | None = Field(None, min_length=10, max_length=256)
+    api_secret: str | None = Field(None, min_length=10, max_length=256)
     # Note: status removed intentionally — status changes must go through
     # dedicated endpoints (/start, /stop, /emergency-close) which enforce
     # platform trading checks
@@ -54,7 +76,7 @@ class AccountSettingsResponse(AccountSettingsBase):
     account_id: UUID
     version: int
     updated_at: datetime
-    updated_by: Optional[UUID] = None
+    updated_by: UUID | None = None
 
     class Config:
         from_attributes = True
@@ -68,8 +90,8 @@ class AccountResponse(AccountBase):
     auto_trade_enabled: bool = False
     created_at: datetime
     updated_at: datetime
-    
-    settings: Optional[AccountSettingsResponse] = None
+
+    settings: AccountSettingsResponse | None = None
 
     class Config:
         from_attributes = True

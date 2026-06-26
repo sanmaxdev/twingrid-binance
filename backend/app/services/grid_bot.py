@@ -1,30 +1,34 @@
-import structlog
+from datetime import UTC, datetime, timedelta
+from decimal import ROUND_DOWN, Decimal
+
 import pandas as pd
-from decimal import Decimal, ROUND_DOWN
-from datetime import datetime, timezone, timedelta
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+import structlog
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
+from app.core.enums import AccountStatus, BasketStatus
 from app.core.security import decrypt_secret
 from app.models.account import Account
-from app.models.settings import AccountSettings
 from app.models.basket import Basket
 from app.models.order import Order
 from app.models.platform_settings import PlatformSettings
+from app.models.settings import AccountSettings
 from app.services.binance_client import BinanceClient
-from app.core.enums import AccountStatus, BasketStatus
-
-from app.strategy.indicators import evaluate_signals
-from app.strategy.grid import calculate_grid_levels, calculate_tp_price
-from app.strategy.trend_filter import detect_trend, evaluate_trend_filter
-from app.services.risk_manager import (
-    check_user_gates, check_account_gates, check_cooldown, check_basket_age,
-    evaluate_basket_risk, calculate_liquidation_price
-)
-from app.services.fee_service import check_balance_gate, deduct_fee
 from app.services.binance_ws_manager import ws_cache
+from app.services.fee_service import check_balance_gate, deduct_fee
+from app.services.risk_manager import (
+    calculate_liquidation_price,
+    check_account_gates,
+    check_basket_age,
+    check_cooldown,
+    check_user_gates,
+    evaluate_basket_risk,
+)
+from app.strategy.grid import calculate_grid_levels, calculate_tp_price
+from app.strategy.indicators import evaluate_signals
+from app.strategy.trend_filter import detect_trend, evaluate_trend_filter
 
 logger = structlog.get_logger(__name__)
 
@@ -73,7 +77,7 @@ def round_step(value: float, step_size: float) -> float:
         return value
     d_val = Decimal(str(value))
     d_step = Decimal(str(step_size))
-    return float((d_val / d_step).quantize(Decimal('1'), rounding=ROUND_DOWN) * d_step)
+    return float((d_val / d_step).quantize(Decimal("1"), rounding=ROUND_DOWN) * d_step)
 
 
 def round_tick(value: float, tick_size: float) -> float:
@@ -82,38 +86,53 @@ def round_tick(value: float, tick_size: float) -> float:
         return value
     d_val = Decimal(str(value))
     d_tick = Decimal(str(tick_size))
-    return float((d_val / d_tick).quantize(Decimal('1'), rounding=ROUND_DOWN) * d_tick)
+    return float((d_val / d_tick).quantize(Decimal("1"), rounding=ROUND_DOWN) * d_tick)
 
 
 class GridBotService:
     def __init__(self, account_id: str):
         self.account_id = account_id
 
-    async def _fetch_klines_df(self, client: BinanceClient, symbol: str, interval: str, limit: int = 100) -> pd.DataFrame:
+    async def _fetch_klines_df(
+        self, client: BinanceClient, symbol: str, interval: str, limit: int = 100
+    ) -> pd.DataFrame:
         raw_data = await client.get_klines(symbol, interval, limit=limit)
-        df = pd.DataFrame(raw_data, columns=[
-            'open_time', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-        ])
-        for col in ['open', 'high', 'low', 'close', 'volume']:
+        df = pd.DataFrame(
+            raw_data,
+            columns=[
+                "open_time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "close_time",
+                "quote_asset_volume",
+                "number_of_trades",
+                "taker_buy_base_asset_volume",
+                "taker_buy_quote_asset_volume",
+                "ignore",
+            ],
+        )
+        for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
         return df
 
     async def _get_symbol_precision(self, client: BinanceClient, symbol: str) -> dict:
         """Fetch Binance exchange info for quantity/price precision.
-        
+
         Caches results in Redis for 1 hour to avoid repeated 40-weight API calls.
         """
         import json as _json
+
         import redis.asyncio as aioredis
 
         cache_key = f"twingrid:precision:{symbol}:{client.is_testnet}"
         try:
             # Try Redis cache first
             redis_client = aioredis.from_url(
-                settings.REDIS_URL if hasattr(settings, 'REDIS_URL') else "redis://redis:6379/0",
-                decode_responses=True
+                settings.REDIS_URL if hasattr(settings, "REDIS_URL") else "redis://redis:6379/0",
+                decode_responses=True,
             )
             cached = await redis_client.get(cache_key)
             if cached:
@@ -170,7 +189,9 @@ class GridBotService:
                 return
 
             # 2. Fetch settings
-            stmt_settings = select(AccountSettings).where(AccountSettings.account_id == self.account_id)
+            stmt_settings = select(AccountSettings).where(
+                AccountSettings.account_id == self.account_id
+            )
             result_settings = await session.execute(stmt_settings)
             settings_obj = result_settings.scalar_one_or_none()
 
@@ -181,17 +202,22 @@ class GridBotService:
             config = settings_obj.config
             # ── Multi-symbol support: read active_symbols list ──
             from app.core.symbols import normalize_active_symbols
+
             active_symbols = normalize_active_symbols(config)
 
-            logger.info(f"Trading symbols: {active_symbols} | Sizing: {config.get('sizing_mode', 'fixed_usd')} | "
-                       f"Base USD: ${config.get('base_order_usd', 1.0)} | "
-                       f"Compounding: {config.get('compounding_enabled', False)}")
+            logger.info(
+                f"Trading symbols: {active_symbols} | Sizing: {config.get('sizing_mode', 'fixed_usd')} | "
+                f"Base USD: ${config.get('base_order_usd', 1.0)} | "
+                f"Compounding: {config.get('compounding_enabled', False)}"
+            )
 
             # 3. Init Binance Client
             try:
                 api_key = decrypt_secret(account.api_key_encrypted)
                 api_secret = decrypt_secret(account.api_secret_encrypted)
-                client = BinanceClient(api_key=api_key, api_secret=api_secret, is_testnet=account.is_testnet)
+                client = BinanceClient(
+                    api_key=api_key, api_secret=api_secret, is_testnet=account.is_testnet
+                )
             except Exception as e:
                 logger.error(f"Failed to init Binance client for account {self.account_id}: {e}")
                 return
@@ -202,7 +228,9 @@ class GridBotService:
                 stmt_basket = select(Basket).where(
                     Basket.account_id == self.account_id,
                     Basket.symbol == symbol,
-                    Basket.status.in_([BasketStatus.OPENING, BasketStatus.OPEN, BasketStatus.CLOSING])
+                    Basket.status.in_(
+                        [BasketStatus.OPENING, BasketStatus.OPEN, BasketStatus.CLOSING]
+                    ),
                 )
                 result_basket = await session.execute(stmt_basket)
                 active_basket = result_basket.scalar_one_or_none()
@@ -215,7 +243,9 @@ class GridBotService:
                         aged_baskets = await check_basket_age(session, account.id, max_age)
                         for aged in aged_baskets:
                             if str(aged.id) == str(active_basket.id):
-                                logger.warning(f"⏰ Basket {aged.id} ({symbol}) exceeded max age ({max_age}h). Force-closing.")
+                                logger.warning(
+                                    f"⏰ Basket {aged.id} ({symbol}) exceeded max age ({max_age}h). Force-closing."
+                                )
                                 await self._force_close_basket(session, client, aged, symbol)
                 else:
                     # ── Orphan position check ──
@@ -235,12 +265,12 @@ class GridBotService:
                                 f"{account.id}: positionAmt={orphan_amt}. "
                                 f"No matching OPEN basket in DB. Skipping entry."
                             )
-                            await self._create_recovery_basket(
-                                session, account, symbol, orphan_amt
-                            )
+                            await self._create_recovery_basket(session, account, symbol, orphan_amt)
                             continue  # Skip to next symbol
                     except Exception as e:
-                        logger.warning(f"Orphan position check failed for {symbol} (non-fatal): {e}")
+                        logger.warning(
+                            f"Orphan position check failed for {symbol} (non-fatal): {e}"
+                        )
 
                     # Run risk gates before evaluating entry
                     user_check = await check_user_gates(session, account.user_id)
@@ -280,15 +310,10 @@ class GridBotService:
             if not account or account.status != AccountStatus.RUNNING:
                 return
 
-            config_stmt = select(AccountSettings).where(AccountSettings.account_id == self.account_id)
-            config_result = await session.execute(config_stmt)
-            settings_obj = config_result.scalar_one_or_none()
-            config = settings_obj.config if settings_obj else {}
-
             # Monitor ALL active baskets for this account (any symbol)
             stmt_basket = select(Basket).where(
                 Basket.account_id == self.account_id,
-                Basket.status.in_([BasketStatus.OPENING, BasketStatus.OPEN, BasketStatus.CLOSING])
+                Basket.status.in_([BasketStatus.OPENING, BasketStatus.OPEN, BasketStatus.CLOSING]),
             )
             result_basket = await session.execute(stmt_basket)
             active_baskets = result_basket.scalars().all()
@@ -296,7 +321,9 @@ class GridBotService:
             if active_baskets:
                 api_key = decrypt_secret(account.api_key_encrypted)
                 api_secret = decrypt_secret(account.api_secret_encrypted)
-                client = BinanceClient(api_key=api_key, api_secret=api_secret, is_testnet=account.is_testnet)
+                client = BinanceClient(
+                    api_key=api_key, api_secret=api_secret, is_testnet=account.is_testnet
+                )
                 for basket in active_baskets:
                     await self._monitor_basket(session, client, basket, basket.symbol)
 
@@ -311,19 +338,24 @@ class GridBotService:
         properly finalize it (PnL, fee, notifications) when it closes.
         """
         import uuid
+
         side = "LONG" if position_amt > 0 else "SHORT"
         qty = abs(position_amt)
 
         # Avoid creating duplicate recovery baskets — check if one already
         # exists for this account in the last 5 minutes.
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
-        existing = (await session.execute(
-            select(func.count()).select_from(Basket).where(
-                Basket.account_id == account.id,
-                Basket.status.in_([BasketStatus.OPENING, BasketStatus.OPEN]),
-                Basket.opened_at >= cutoff,
+        cutoff = datetime.now(UTC) - timedelta(minutes=5)
+        existing = (
+            await session.execute(
+                select(func.count())
+                .select_from(Basket)
+                .where(
+                    Basket.account_id == account.id,
+                    Basket.status.in_([BasketStatus.OPENING, BasketStatus.OPEN]),
+                    Basket.opened_at >= cutoff,
+                )
             )
-        )).scalar() or 0
+        ).scalar() or 0
         if existing > 0:
             logger.debug(
                 f"Recovery basket already exists for account {account.id}, "
@@ -336,9 +368,12 @@ class GridBotService:
         mark_price = 0.0
         try:
             from app.services.binance_client import BinanceClient
+
             api_key = decrypt_secret(account.api_key_encrypted)
             api_secret = decrypt_secret(account.api_secret_encrypted)
-            client = BinanceClient(api_key=api_key, api_secret=api_secret, is_testnet=account.is_testnet)
+            client = BinanceClient(
+                api_key=api_key, api_secret=api_secret, is_testnet=account.is_testnet
+            )
             positions = await client.get_position_info(symbol)
             for pos in positions:
                 if abs(float(pos.get("positionAmt", 0))) > 0:
@@ -352,9 +387,7 @@ class GridBotService:
             avg_entry = mark_price if mark_price > 0 else 1.0
 
         # Get account config for leverage and TP settings
-        config_stmt = select(AccountSettings).where(
-            AccountSettings.account_id == account.id
-        )
+        config_stmt = select(AccountSettings).where(AccountSettings.account_id == account.id)
         config_result = await session.execute(config_stmt)
         acct_settings = config_result.scalar_one_or_none()
         config = acct_settings.config if acct_settings and acct_settings.config else {}
@@ -387,7 +420,7 @@ class GridBotService:
             grid_levels=[],  # No SO levels for recovery
             tp_target_usd=tp_target_usd,
             sos_filled=0,
-            opened_at=datetime.now(timezone.utc),
+            opened_at=datetime.now(UTC),
             config_snapshot={"_recovery": True, **config},
         )
         session.add(basket)
@@ -444,7 +477,7 @@ class GridBotService:
                 db_order.status = detail.get("status", "FILLED")
                 db_order.filled_qty = float(detail.get("executedQty", 0))
                 db_order.avg_fill_price = float(detail.get("avgPrice", 0))
-                db_order.filled_at = datetime.now(timezone.utc)
+                db_order.filled_at = datetime.now(UTC)
 
                 # Get real commission from userTrades (accurate), fallback to estimate
                 commission = 0.0
@@ -452,7 +485,8 @@ class GridBotService:
                     if db_order.status == "FILLED":
                         trades = await client.get_trade_history(symbol=symbol, limit=50)
                         order_trades = [
-                            t for t in trades
+                            t
+                            for t in trades
                             if str(t.get("orderId")) == str(db_order.binance_order_id)
                         ]
                         if order_trades:
@@ -479,9 +513,11 @@ class GridBotService:
             # Do NOT assume FILLED on error — leave as UNKNOWN for retry on next tick
             db_order.status = "UNKNOWN"
 
-    async def _finalize_basket(self, session, client: BinanceClient, basket: Basket, symbol: str, notify: bool = True):
+    async def _finalize_basket(
+        self, session, client: BinanceClient, basket: Basket, symbol: str, notify: bool = True
+    ):
         """Calculate realized PnL and total fees when a basket closes.
-        
+
         Priority for PnL source:
           1. Already recovered PnL (set by position watchdog)
           2. Binance userTrades matched by basket's order IDs (most accurate)
@@ -497,8 +533,7 @@ class GridBotService:
 
             # Collect this basket's Binance order IDs
             basket_binance_order_ids = {
-                str(o.binance_order_id) for o in all_orders
-                if o.binance_order_id
+                str(o.binance_order_id) for o in all_orders if o.binance_order_id
             }
 
             # ── Method 1: If PnL was already recovered (by position watchdog), use it ──
@@ -517,13 +552,18 @@ class GridBotService:
                     try:
                         trades = await client.get_trade_history(symbol, limit=100)
                         matching_trades = [
-                            t for t in trades
+                            t
+                            for t in trades
                             if str(t.get("orderId", "")) in basket_binance_order_ids
                         ]
 
                         if matching_trades:
-                            binance_pnl = sum(float(t.get("realizedPnl", 0)) for t in matching_trades)
-                            binance_fees = sum(float(t.get("commission", 0)) for t in matching_trades)
+                            binance_pnl = sum(
+                                float(t.get("realizedPnl", 0)) for t in matching_trades
+                            )
+                            binance_fees = sum(
+                                float(t.get("commission", 0)) for t in matching_trades
+                            )
                             logger.info(
                                 f"Basket {basket.id} PnL from Binance trades: "
                                 f"pnl={binance_pnl:.4f}, fees={binance_fees:.6f}, "
@@ -548,16 +588,22 @@ class GridBotService:
 
                     # ── Method 4: Order-based calculation (last resort) ──
                     if basket.realized_pnl is None or float(basket.realized_pnl) == 0:
-                        total_fees = sum(float(o.commission or 0) for o in all_orders if o.status == "FILLED")
+                        total_fees = sum(
+                            float(o.commission or 0) for o in all_orders if o.status == "FILLED"
+                        )
                         basket.fees_paid = total_fees
 
                         # Find the LATEST filled TP that matches the basket's qty
-                        filled_tps = [o for o in all_orders if o.role == "TP" and o.status == "FILLED"]
+                        filled_tps = [
+                            o for o in all_orders if o.role == "TP" and o.status == "FILLED"
+                        ]
                         tp_order = None
                         if filled_tps:
                             # Pick the TP whose qty matches the basket qty (full close)
                             basket_qty = float(basket.qty or 0)
-                            for tp in sorted(filled_tps, key=lambda o: float(o.qty or 0), reverse=True):
+                            for tp in sorted(
+                                filled_tps, key=lambda o: float(o.qty or 0), reverse=True
+                            ):
                                 tp_qty = float(tp.qty or tp.filled_qty or 0)
                                 if basket_qty > 0 and abs(tp_qty - basket_qty) / basket_qty < 0.05:
                                     tp_order = tp
@@ -569,7 +615,9 @@ class GridBotService:
                                     f"TP qtys: {[float(t.qty or 0) for t in filled_tps]}"
                                 )
 
-                        entry_orders = [o for o in all_orders if o.role != "TP" and o.status == "FILLED"]
+                        entry_orders = [
+                            o for o in all_orders if o.role != "TP" and o.status == "FILLED"
+                        ]
 
                         if tp_order and entry_orders and basket.avg_entry:
                             # Use avg_fill_price if available and non-zero, otherwise fall back to limit price
@@ -599,7 +647,9 @@ class GridBotService:
                                     else:
                                         raw_pnl = (entry_price - current_price) * qty
                                     basket.realized_pnl = raw_pnl - total_fees
-                                    logger.info(f"Basket {basket.id} force-close PnL: {basket.realized_pnl:.4f}")
+                                    logger.info(
+                                        f"Basket {basket.id} force-close PnL: {basket.realized_pnl:.4f}"
+                                    )
                             except Exception as e:
                                 logger.warning(f"Could not estimate force-close PnL: {e}")
 
@@ -609,8 +659,7 @@ class GridBotService:
                 if basket_binance_order_ids:
                     trades = await client.get_trade_history(symbol, limit=100)
                     matched = [
-                        t for t in trades
-                        if str(t.get("orderId", "")) in basket_binance_order_ids
+                        t for t in trades if str(t.get("orderId", "")) in basket_binance_order_ids
                     ]
                     if matched:
                         real_fees = sum(float(t.get("commission", 0)) for t in matched)
@@ -624,7 +673,8 @@ class GridBotService:
                         for order in all_orders:
                             if order.status == "FILLED" and float(order.commission or 0) == 0:
                                 order_trades = [
-                                    t for t in matched
+                                    t
+                                    for t in matched
                                     if str(t.get("orderId")) == str(order.binance_order_id)
                                 ]
                                 if order_trades:
@@ -637,7 +687,7 @@ class GridBotService:
             # ── Funding fees from Binance income history ──
             try:
                 start_ms = int(basket.opened_at.timestamp() * 1000) if basket.opened_at else None
-                closed_at = basket.closed_at or datetime.now(timezone.utc)
+                closed_at = basket.closed_at or datetime.now(UTC)
                 end_ms = int(closed_at.timestamp() * 1000)
                 if start_ms:
                     funding_records = await client.get_income_history(
@@ -658,7 +708,9 @@ class GridBotService:
             except Exception as e:
                 logger.warning(f"Failed to fetch funding from income history: {e}")
 
-            logger.info(f"✅ Basket {basket.id} finalized: fees={basket.fees_paid}, funding={basket.funding_paid}, pnl={basket.realized_pnl}")
+            logger.info(
+                f"✅ Basket {basket.id} finalized: fees={basket.fees_paid}, funding={basket.funding_paid}, pnl={basket.realized_pnl}"
+            )
 
             # Deduct Twin Grid Fee on profitable baskets
             if basket.realized_pnl and float(basket.realized_pnl) > 0:
@@ -677,12 +729,17 @@ class GridBotService:
             # Send basket closed email + Telegram (only if caller didn't suppress)
             if notify:
                 try:
-                    from app.models.user import User
                     from app.models.account import Account
+                    from app.models.user import User
                     from app.services.notification_service import notification_service
-                    user_result = await session.execute(select(User).where(User.id == basket.user_id))
+
+                    user_result = await session.execute(
+                        select(User).where(User.id == basket.user_id)
+                    )
                     user_obj = user_result.scalars().first()
-                    acct_result = await session.execute(select(Account.name).where(Account.id == basket.account_id))
+                    acct_result = await session.execute(
+                        select(Account.name).where(Account.id == basket.account_id)
+                    )
                     acct_name = acct_result.scalar() or "Account"
                     if user_obj:
                         pnl_val = float(basket.realized_pnl or 0)
@@ -694,10 +751,15 @@ class GridBotService:
                             mins = int((delta.total_seconds() % 3600) // 60)
                             duration = f"{hours}h {mins}m"
                         await notification_service.notify_basket_closed(
-                            user_obj.email, symbol, basket.side,
-                            f"${pnl_val:+.4f}", f"${fees_val:.4f}",
-                            duration or "N/A", basket.exit_reason or "TP Hit",
-                            user_id=basket.user_id, account_name=acct_name,
+                            user_obj.email,
+                            symbol,
+                            basket.side,
+                            f"${pnl_val:+.4f}",
+                            f"${fees_val:.4f}",
+                            duration or "N/A",
+                            basket.exit_reason or "TP Hit",
+                            user_id=basket.user_id,
+                            account_name=acct_name,
                         )
                 except Exception as e:
                     logger.warning(f"Failed to send basket close notification: {e}")
@@ -716,8 +778,7 @@ class GridBotService:
             # event yet.  Skipping the position watchdog prevents the stale
             # cache from triggering a false MANUAL_CLOSE after 30 seconds.
             basket_age_seconds = (
-                (datetime.now(timezone.utc) - basket.opened_at).total_seconds()
-                if basket.opened_at else 999
+                (datetime.now(UTC) - basket.opened_at).total_seconds() if basket.opened_at else 999
             )
             skip_position_watchdog = basket_age_seconds < 120
 
@@ -853,8 +914,7 @@ class GridBotService:
 
                 # Mark all pending DB orders as CANCELED (except TP if already set to FILLED)
                 stmt_pending = select(Order).where(
-                    Order.basket_id == basket.id,
-                    Order.status.in_(["NEW", "PARTIALLY_FILLED"])
+                    Order.basket_id == basket.id, Order.status.in_(["NEW", "PARTIALLY_FILLED"])
                 )
                 result_pending = await session.execute(stmt_pending)
                 for order in result_pending.scalars().all():
@@ -874,8 +934,7 @@ class GridBotService:
                 )
                 all_basket_orders = all_basket_orders_result.scalars().all()
                 basket_binance_order_ids = {
-                    str(o.binance_order_id) for o in all_basket_orders
-                    if o.binance_order_id
+                    str(o.binance_order_id) for o in all_basket_orders if o.binance_order_id
                 }
 
                 # Method 1 (Best): Sum realizedPnl from Binance trades matched by order IDs
@@ -883,11 +942,14 @@ class GridBotService:
                     try:
                         trades = await client.get_trade_history(symbol, limit=100)
                         matching_trades = [
-                            t for t in trades
+                            t
+                            for t in trades
                             if str(t.get("orderId", "")) in basket_binance_order_ids
                         ]
                         if matching_trades:
-                            recovered_pnl = sum(float(t.get("realizedPnl", 0)) for t in matching_trades)
+                            recovered_pnl = sum(
+                                float(t.get("realizedPnl", 0)) for t in matching_trades
+                            )
                             logger.info(
                                 f"Recovered PnL from {len(matching_trades)} basket trades: "
                                 f"{recovered_pnl:.4f}"
@@ -929,7 +991,7 @@ class GridBotService:
                 # notification below based on exit_reason.
                 # ─────────────────────────────────────────────────────────────
                 basket.status = BasketStatus.CLOSED
-                basket.closed_at = datetime.now(timezone.utc)
+                basket.closed_at = datetime.now(UTC)
                 basket.exit_reason = exit_reason
 
                 # Finalize basket — compute fees. notify=False prevents duplicate Telegram.
@@ -937,12 +999,17 @@ class GridBotService:
 
                 # Send exactly ONE notification appropriate for the exit reason.
                 try:
-                    from app.models.user import User
                     from app.models.account import Account
+                    from app.models.user import User
                     from app.services.notification_service import notification_service
-                    user_result = await session.execute(select(User).where(User.id == basket.user_id))
+
+                    user_result = await session.execute(
+                        select(User).where(User.id == basket.user_id)
+                    )
                     user_obj = user_result.scalars().first()
-                    acct_result = await session.execute(select(Account.name).where(Account.id == basket.account_id))
+                    acct_result = await session.execute(
+                        select(Account.name).where(Account.id == basket.account_id)
+                    )
                     acct_name = acct_result.scalar() or "Account"
                     if user_obj:
                         pnl_val = float(basket.realized_pnl or 0)
@@ -957,19 +1024,28 @@ class GridBotService:
                         if exit_reason == "TP_FILLED":
                             # TP filled by bot — send standard BASKET CLOSED notification
                             await notification_service.notify_basket_closed(
-                                user_obj.email, symbol, basket.side,
-                                f"${pnl_val:+.4f}", f"${fees_val:.4f}",
-                                duration or "N/A", exit_reason,
-                                user_id=basket.user_id, account_name=acct_name,
+                                user_obj.email,
+                                symbol,
+                                basket.side,
+                                f"${pnl_val:+.4f}",
+                                f"${fees_val:.4f}",
+                                duration or "N/A",
+                                exit_reason,
+                                user_id=basket.user_id,
+                                account_name=acct_name,
                             )
                         else:
                             # Truly external close (manual, liquidation, ADL)
                             await notification_service.notify_position_closed_externally(
-                                user_obj.email, symbol, basket.side,
+                                user_obj.email,
+                                symbol,
+                                basket.side,
                                 exit_reason,
-                                f"${pnl_val:+.4f}", f"${fees_val:.4f}",
+                                f"${pnl_val:+.4f}",
+                                f"${fees_val:.4f}",
                                 duration or "N/A",
-                                user_id=basket.user_id, account_name=acct_name,
+                                user_id=basket.user_id,
+                                account_name=acct_name,
                             )
                 except Exception as e:
                     logger.warning(f"Failed to send close notification: {e}")
@@ -996,7 +1072,7 @@ class GridBotService:
             # Fetch DB orders that are NEW, PARTIALLY_FILLED, or UNKNOWN (retry after query error)
             stmt_orders = select(Order).where(
                 Order.basket_id == basket.id,
-                Order.status.in_(["NEW", "PARTIALLY_FILLED", "UNKNOWN"])
+                Order.status.in_(["NEW", "PARTIALLY_FILLED", "UNKNOWN"]),
             )
             result_orders = await session.execute(stmt_orders)
             pending_orders = result_orders.scalars().all()
@@ -1004,24 +1080,31 @@ class GridBotService:
             for db_order in pending_orders:
                 if str(db_order.binance_order_id) not in open_order_ids:
                     # Order is no longer open — query Binance for actual fill details
-                    logger.info(f"Order {db_order.role} ({db_order.binance_order_id}) no longer open. Querying fill data...")
+                    logger.info(
+                        f"Order {db_order.role} ({db_order.binance_order_id}) no longer open. Querying fill data..."
+                    )
                     await self._query_order_fill(client, db_order, symbol)
 
                     if db_order.role == "TP":
                         if db_order.status == "FILLED":
                             logger.info(f"TP FILLED for basket {basket.id}! Closing basket.")
                             basket.status = BasketStatus.CLOSED
-                            basket.closed_at = datetime.now(timezone.utc)
+                            basket.closed_at = datetime.now(UTC)
                             basket.exit_reason = "TP_FILLED"
 
                             # Cancel remaining open orders on Binance
                             # (only cancel specific orders, not cancel_all_orders
                             # which could affect other baskets/accounts)
                             for other_order in pending_orders:
-                                if other_order.id != db_order.id and other_order.status not in ("FILLED", "CANCELED"):
+                                if other_order.id != db_order.id and other_order.status not in (
+                                    "FILLED",
+                                    "CANCELED",
+                                ):
                                     if other_order.binance_order_id:
                                         try:
-                                            await client.cancel_order(symbol, order_id=other_order.binance_order_id)
+                                            await client.cancel_order(
+                                                symbol, order_id=other_order.binance_order_id
+                                            )
                                         except Exception:
                                             pass  # May already be gone
                                     other_order.status = "CANCELED"
@@ -1030,14 +1113,17 @@ class GridBotService:
                             await self._finalize_basket(session, client, basket, symbol)
                             break
                         else:
-                            logger.warning(f"TP order {db_order.binance_order_id} was {db_order.status}, not FILLED! Not closing basket yet.")
+                            logger.warning(
+                                f"TP order {db_order.binance_order_id} was {db_order.status}, not FILLED! Not closing basket yet."
+                            )
                             # The safety net will replace it on the next monitor loop tick since role='TP' is no longer 'NEW'/'PARTIALLY_FILLED'
-
 
                     elif db_order.role.startswith("SO"):
                         if db_order.status == "FILLED":
                             basket.sos_filled = (basket.sos_filled or 0) + 1
-                            logger.info(f"SO filled: {db_order.role} (total SOs filled: {basket.sos_filled})")
+                            logger.info(
+                                f"SO filled: {db_order.role} (total SOs filled: {basket.sos_filled})"
+                            )
 
                             # Recalculate average entry and update TP
                             await self._recalculate_tp_after_so(session, client, basket, symbol)
@@ -1046,10 +1132,19 @@ class GridBotService:
                             try:
                                 from app.models.account import Account
                                 from app.services.notification_service import notification_service
-                                acct_result = await session.execute(select(Account.name).where(Account.id == basket.account_id))
+
+                                acct_result = await session.execute(
+                                    select(Account.name).where(Account.id == basket.account_id)
+                                )
                                 acct_name = acct_result.scalar() or "Account"
-                                max_sos = basket.config_snapshot.get("max_safety_orders", "?") if basket.config_snapshot else "?"
-                                fill_price = f"${float(db_order.avg_fill_price or db_order.price or 0):.4f}"
+                                max_sos = (
+                                    basket.config_snapshot.get("max_safety_orders", "?")
+                                    if basket.config_snapshot
+                                    else "?"
+                                )
+                                fill_price = (
+                                    f"${float(db_order.avg_fill_price or db_order.price or 0):.4f}"
+                                )
                                 new_avg = f"${float(basket.avg_entry or 0):.4f}"
                                 total_qty = f"{float(basket.qty or 0):.6f}"
                                 await notification_service.notify_safety_order_filled(
@@ -1077,7 +1172,7 @@ class GridBotService:
                 tp_check_stmt = select(Order).where(
                     Order.basket_id == basket.id,
                     Order.role == "TP",
-                    Order.status.in_(["NEW", "PARTIALLY_FILLED"])
+                    Order.status.in_(["NEW", "PARTIALLY_FILLED"]),
                 )
                 tp_check_result = await session.execute(tp_check_stmt)
                 active_tp = tp_check_result.scalar_one_or_none()
@@ -1100,7 +1195,10 @@ class GridBotService:
                             basket.config_snapshot = {**snapshot, "_tp_retry_count": 0}
                         except Exception as tp_err:
                             logger.warning(f"TP retry failed: {tp_err}")
-                            basket.config_snapshot = {**snapshot, "_tp_retry_count": tp_retry_count + 1}
+                            basket.config_snapshot = {
+                                **snapshot,
+                                "_tp_retry_count": tp_retry_count + 1,
+                            }
 
             # ── Risk Controller Check ──
             # After processing all order updates, evaluate risk on the active basket
@@ -1111,7 +1209,12 @@ class GridBotService:
                     if balances is None:
                         balances = await client.get_balances()
                     usdt_balance = next(
-                        (float(b.get("balance", b.get("walletBalance", 0))) for b in balances if b.get("asset") == "USDT"), 0.0
+                        (
+                            float(b.get("balance", b.get("walletBalance", 0)))
+                            for b in balances
+                            if b.get("asset") == "USDT"
+                        ),
+                        0.0,
                     )
 
                     # Cache-first: try WebSocket-cached positions, fallback to REST
@@ -1140,7 +1243,9 @@ class GridBotService:
                     # This avoids adding a new DB column — the value lives in a runtime scratch key.
                     current_loss_usd = abs(min(unrealized_pnl, 0.0))
                     snapshot = basket.config_snapshot or {}
-                    peak_loss_usd = max(float(snapshot.get("_rc_peak_loss_usd", 0.0)), current_loss_usd)
+                    peak_loss_usd = max(
+                        float(snapshot.get("_rc_peak_loss_usd", 0.0)), current_loss_usd
+                    )
                     if peak_loss_usd > float(snapshot.get("_rc_peak_loss_usd", 0.0)):
                         # Persist updated peak into config_snapshot (JSONB field, no migration needed)
                         basket.config_snapshot = {**snapshot, "_rc_peak_loss_usd": peak_loss_usd}
@@ -1160,31 +1265,35 @@ class GridBotService:
                             f"🛡️ RISK CONTROLLER triggered for basket {basket.id}: "
                             f"{risk_check.reason}"
                         )
-                        await self._force_close_basket(
-                            session, client, basket, symbol
-                        )
+                        await self._force_close_basket(session, client, basket, symbol)
                         basket.exit_reason = "RISK_STOP"
                         await session.commit()
 
                         # Send risk stop notification + Telegram
                         try:
-                            from app.models.user import User
                             from app.models.account import Account
+                            from app.models.user import User
                             from app.services.notification_service import notification_service
+
                             user_result = await session.execute(
                                 select(User).where(User.id == basket.user_id)
                             )
                             user_obj = user_result.scalars().first()
-                            acct_result = await session.execute(select(Account.name).where(Account.id == basket.account_id))
+                            acct_result = await session.execute(
+                                select(Account.name).where(Account.id == basket.account_id)
+                            )
                             acct_name = acct_result.scalar() or "Account"
                             if user_obj:
                                 pnl_val = float(basket.realized_pnl or 0)
                                 await notification_service.notify_risk_stop(
-                                    user_obj.email, symbol, basket.side,
+                                    user_obj.email,
+                                    symbol,
+                                    basket.side,
                                     f"${pnl_val:+.4f}",
                                     str(basket.sos_filled or 0),
                                     risk_check.reason,
-                                    user_id=basket.user_id, account_name=acct_name,
+                                    user_id=basket.user_id,
+                                    account_name=acct_name,
                                 )
                         except Exception as e:
                             logger.warning(f"Failed to send risk stop notification: {e}")
@@ -1198,7 +1307,9 @@ class GridBotService:
         except Exception as e:
             logger.error(f"Error monitoring basket {basket.id}: {e}")
 
-    async def _force_close_basket(self, session, client: BinanceClient, basket: Basket, symbol: str):
+    async def _force_close_basket(
+        self, session, client: BinanceClient, basket: Basket, symbol: str
+    ):
         """Force-close a basket at market price (age limit, manual close, etc)."""
         try:
             logger.warning(f"Force-closing basket {basket.id} ({basket.side} {symbol})")
@@ -1227,12 +1338,10 @@ class GridBotService:
                 close_qty = round_step(close_qty, precision["qty_step"])
 
                 if close_qty > 0:
-                    await client.place_market_order(
-                        symbol, close_side, close_qty, reduce_only=True
-                    )
+                    await client.place_market_order(symbol, close_side, close_qty, reduce_only=True)
 
             basket.status = BasketStatus.CLOSED
-            basket.closed_at = datetime.now(timezone.utc)
+            basket.closed_at = datetime.now(UTC)
             basket.exit_reason = "AGE_LIMIT"
 
             # Finalize basket — compute PnL and fees
@@ -1271,10 +1380,14 @@ class GridBotService:
 
         # Check if this basket has pre-placed SO limit orders (legacy mode).
         # If yes, skip virtual SO logic — the normal order monitoring handles them.
-        legacy_so_stmt = select(func.count()).select_from(Order).where(
-            Order.basket_id == basket.id,
-            Order.role.like("SO%"),
-            Order.type == "LIMIT",
+        legacy_so_stmt = (
+            select(func.count())
+            .select_from(Order)
+            .where(
+                Order.basket_id == basket.id,
+                Order.role.like("SO%"),
+                Order.type == "LIMIT",
+            )
         )
         legacy_count = (await session.execute(legacy_so_stmt)).scalar() or 0
         if legacy_count > 0:
@@ -1324,14 +1437,18 @@ class GridBotService:
             so_qty = round_step(float(so_level["qty"]), precision["qty_step"])
 
             if so_qty < precision["min_qty"]:
-                logger.warning(f"Virtual SO{so_index}: qty {so_qty} below min {precision['min_qty']}. Skipping.")
+                logger.warning(
+                    f"Virtual SO{so_index}: qty {so_qty} below min {precision['min_qty']}. Skipping."
+                )
                 basket.sos_filled = so_index
                 continue
 
             # Check notional
             so_notional = so_qty * mark_price
             if so_notional < precision.get("min_notional", 5.0):
-                logger.warning(f"Virtual SO{so_index}: notional ${so_notional:.2f} below min. Skipping.")
+                logger.warning(
+                    f"Virtual SO{so_index}: notional ${so_notional:.2f} below min. Skipping."
+                )
                 basket.sos_filled = so_index
                 continue
 
@@ -1352,8 +1469,7 @@ class GridBotService:
                 if so_avg_price == 0:
                     so_avg_price = mark_price
                 so_commission = sum(
-                    float(f.get("commission", 0))
-                    for f in so_response.get("fills", [])
+                    float(f.get("commission", 0)) for f in so_response.get("fills", [])
                 )
                 if so_commission == 0:
                     cum_quote = float(so_response.get("cumQuote", 0))
@@ -1375,7 +1491,7 @@ class GridBotService:
                     filled_qty=so_filled_qty,
                     avg_fill_price=so_avg_price,
                     commission=so_commission,
-                    filled_at=datetime.now(timezone.utc),
+                    filled_at=datetime.now(UTC),
                     raw_response=so_response,
                 )
                 session.add(so_order)
@@ -1395,14 +1511,14 @@ class GridBotService:
         if any_so_fired:
             await self._recalculate_tp_after_so(session, client, basket, symbol)
 
-    async def _recalculate_tp_after_so(self, session, client: BinanceClient, basket: Basket, symbol: str):
+    async def _recalculate_tp_after_so(
+        self, session, client: BinanceClient, basket: Basket, symbol: str
+    ):
         """After an SO fills, recalculate weighted avg entry and replace the TP order."""
         try:
             # Get all FILLED orders for this basket (BO + SOs)
             stmt = select(Order).where(
-                Order.basket_id == basket.id,
-                Order.status == "FILLED",
-                Order.role != "TP"
+                Order.basket_id == basket.id, Order.status == "FILLED", Order.role != "TP"
             )
             result = await session.execute(stmt)
             filled_orders = result.scalars().all()
@@ -1412,7 +1528,9 @@ class GridBotService:
 
             # Calculate weighted average entry
             total_qty = sum(float(o.qty) for o in filled_orders)
-            total_cost = sum(float(o.qty) * float(o.price or o.avg_fill_price or 0) for o in filled_orders)
+            total_cost = sum(
+                float(o.qty) * float(o.price or o.avg_fill_price or 0) for o in filled_orders
+            )
 
             if total_qty <= 0:
                 return
@@ -1434,7 +1552,7 @@ class GridBotService:
             old_tp_stmt = select(Order).where(
                 Order.basket_id == basket.id,
                 Order.role == "TP",
-                Order.status.in_(["NEW", "PARTIALLY_FILLED"])
+                Order.status.in_(["NEW", "PARTIALLY_FILLED"]),
             )
             old_tp_result = await session.execute(old_tp_stmt)
             old_tp = old_tp_result.scalar_one_or_none()
@@ -1464,17 +1582,21 @@ class GridBotService:
                 qty=rounded_qty,
                 price=new_tp_price,
                 status="NEW",
-                raw_response=tp_response
+                raw_response=tp_response,
             )
             session.add(new_tp_order)
             basket.tp_price = new_tp_price
 
-            logger.info(f"TP recalculated: avg_entry={new_avg_entry:.4f}, qty={total_qty}, new_tp={new_tp_price}")
+            logger.info(
+                f"TP recalculated: avg_entry={new_avg_entry:.4f}, qty={total_qty}, new_tp={new_tp_price}"
+            )
 
         except Exception as e:
             logger.error(f"Failed to recalculate TP for basket {basket.id}: {e}")
 
-    async def _evaluate_entry(self, session, client: BinanceClient, account: Account, config: dict, symbol: str):
+    async def _evaluate_entry(
+        self, session, client: BinanceClient, account: Account, config: dict, symbol: str
+    ):
         """No active basket — evaluate indicator signals for potential entry."""
         logger.info(f"Evaluating entry signals for account {account.id} on {symbol}...")
         try:
@@ -1484,7 +1606,9 @@ class GridBotService:
             df_1h = await self._fetch_klines_df(client, symbol, "1h", limit=100)
 
             signals = evaluate_signals(
-                df_1m, df_5m, df_1h,
+                df_1m,
+                df_5m,
+                df_1h,
                 rsi_period=config.get("rsi_period", 14),
                 rsi_long_threshold=config.get("rsi_long_threshold", 40),
                 rsi_short_threshold=config.get("rsi_short_threshold", 60),
@@ -1498,7 +1622,7 @@ class GridBotService:
             )
 
             # Log signal details for debugging
-            current_close = df_1m['close'].iloc[-1]
+            current_close = df_1m["close"].iloc[-1]
             logger.info(
                 f"Signal check on {symbol}: close={current_close:.2f}, "
                 f"long={signals['long']} (score={signals.get('long_score', 0)}), "
@@ -1529,38 +1653,65 @@ class GridBotService:
                 )
 
                 if signals["long"] and not trend_result["allow_long"]:
-                    logger.info(f"🚫 LONG signal BLOCKED by trend filter ({trend_result['direction']}): {trend_result['details']}")
+                    logger.info(
+                        f"🚫 LONG signal BLOCKED by trend filter ({trend_result['direction']}): {trend_result['details']}"
+                    )
                     signals["long"] = False
                 if signals["short"] and not trend_result["allow_short"]:
-                    logger.info(f"🚫 SHORT signal BLOCKED by trend filter ({trend_result['direction']}): {trend_result['details']}")
+                    logger.info(
+                        f"🚫 SHORT signal BLOCKED by trend filter ({trend_result['direction']}): {trend_result['details']}"
+                    )
                     signals["short"] = False
 
             if signals["long"] and config.get("allow_long", True):
-                logger.info(f"🟢 LONG signal detected for {symbol}! (score={signals.get('long_score', 0)})")
-                await self._open_basket(session, client, account, config, symbol, "LONG", signals["atr"])
+                logger.info(
+                    f"🟢 LONG signal detected for {symbol}! (score={signals.get('long_score', 0)})"
+                )
+                await self._open_basket(
+                    session, client, account, config, symbol, "LONG", signals["atr"]
+                )
             elif signals["short"] and config.get("allow_short", True):
-                logger.info(f"🔴 SHORT signal detected for {symbol}! (score={signals.get('short_score', 0)})")
-                await self._open_basket(session, client, account, config, symbol, "SHORT", signals["atr"])
+                logger.info(
+                    f"🔴 SHORT signal detected for {symbol}! (score={signals.get('short_score', 0)})"
+                )
+                await self._open_basket(
+                    session, client, account, config, symbol, "SHORT", signals["atr"]
+                )
             else:
-                logger.info(f"No entry signal on {symbol}. L={signals.get('long_score', 0)}/S={signals.get('short_score', 0)} (need {config.get('signal_threshold', 55)})")
+                logger.info(
+                    f"No entry signal on {symbol}. L={signals.get('long_score', 0)}/S={signals.get('short_score', 0)} (need {config.get('signal_threshold', 55)})"
+                )
         except Exception as e:
             logger.error(f"Error evaluating signals for account {account.id}: {e}", exc_info=True)
 
-    async def _open_basket(self, session, client: BinanceClient, account: Account, config: dict, symbol: str, side: str, atr: float):
+    async def _open_basket(
+        self,
+        session,
+        client: BinanceClient,
+        account: Account,
+        config: dict,
+        symbol: str,
+        side: str,
+        atr: float,
+    ):
         """Open a new grid basket: BO market order + SO limit orders + TP limit order."""
         logger.info(f"Opening {side} basket for {symbol} on account {account.id}")
 
         # ── Bug Fix: Consecutive error backoff ──
         # If 3+ ERROR baskets of ANY type in the last 10 minutes,
         # skip this tick to avoid spamming Binance and polluting basket history.
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
-        recent_errors = (await session.execute(
-            select(func.count()).select_from(Basket).where(
-                Basket.account_id == account.id,
-                Basket.status == "ERROR",
-                Basket.opened_at >= cutoff,
+        cutoff = datetime.now(UTC) - timedelta(minutes=10)
+        recent_errors = (
+            await session.execute(
+                select(func.count())
+                .select_from(Basket)
+                .where(
+                    Basket.account_id == account.id,
+                    Basket.status == "ERROR",
+                    Basket.opened_at >= cutoff,
+                )
             )
-        )).scalar() or 0
+        ).scalar() or 0
 
         if recent_errors >= 3:
             logger.warning(
@@ -1600,7 +1751,9 @@ class GridBotService:
         sizing_mode = config.get("sizing_mode", "fixed_usd")
         base_order_usd = config.get("base_order_usd", 1.0)
         compounding_enabled = config.get("compounding_enabled", False)
-        compounding_pct = config.get("compounding_pct", 100.0) / 100.0  # UI sends %, convert to decimal
+        compounding_pct = (
+            config.get("compounding_pct", 100.0) / 100.0
+        )  # UI sends %, convert to decimal
 
         # Determine effective capital:
         #   - pct_capital mode: ALWAYS use full wallet balance (the % is relative to actual balance)
@@ -1650,24 +1803,32 @@ class GridBotService:
         # Set leverage and margin type
         try:
             await client.set_leverage(symbol, config.get("leverage", 10))
-            await client.set_margin_type(symbol, config.get("margin_type", config.get("margin_mode", "CROSS")).upper())
+            await client.set_margin_type(
+                symbol, config.get("margin_type", config.get("margin_mode", "CROSS")).upper()
+            )
         except Exception as e:
             logger.warning(f"Error setting leverage/margin type (may already be set): {e}")
 
         bo = grid_data["bo"]
 
-        logger.info(f"Grid calculated: BO margin=${bo['margin']:.4f}, notional=${bo['notional']:.4f}, qty={bo['qty']:.8f}")
+        logger.info(
+            f"Grid calculated: BO margin=${bo['margin']:.4f}, notional=${bo['notional']:.4f}, qty={bo['qty']:.8f}"
+        )
 
         # Apply Binance precision rounding
         bo_qty = round_step(bo["qty"], precision["qty_step"])
         if bo_qty < precision["min_qty"]:
-            logger.error(f"BO qty {bo_qty} is below minimum {precision['min_qty']}. Skipping basket.")
+            logger.error(
+                f"BO qty {bo_qty} is below minimum {precision['min_qty']}. Skipping basket."
+            )
             return
 
         # Check minimum notional
         bo_notional = bo_qty * ticker_price
         if bo_notional < precision.get("min_notional", 5.0):
-            logger.error(f"BO notional ${bo_notional:.2f} is below minimum ${precision.get('min_notional', 5.0)}. Skipping basket.")
+            logger.error(
+                f"BO notional ${bo_notional:.2f} is below minimum ${precision.get('min_notional', 5.0)}. Skipping basket."
+            )
             return
 
         # Create Basket in DB
@@ -1697,13 +1858,17 @@ class GridBotService:
             if bo_filled_qty <= 0:
                 # Testnet may return executedQty=0 for filled orders — use requested qty
                 bo_filled_qty = bo_qty
-                logger.warning(f"executedQty was 0 in BO response, falling back to requested qty: {bo_qty}")
+                logger.warning(
+                    f"executedQty was 0 in BO response, falling back to requested qty: {bo_qty}"
+                )
             bo_avg_price = float(bo_response.get("avgPrice", 0))
             if bo_avg_price == 0:
                 # Fallback: calculate from fills array
                 fills = bo_response.get("fills", [])
                 if fills:
-                    total_cost = sum(float(f.get("price", 0)) * float(f.get("qty", 0)) for f in fills)
+                    total_cost = sum(
+                        float(f.get("price", 0)) * float(f.get("qty", 0)) for f in fills
+                    )
                     total_qty = sum(float(f.get("qty", 0)) for f in fills)
                     bo_avg_price = total_cost / total_qty if total_qty > 0 else bo["price"]
                 else:
@@ -1715,7 +1880,9 @@ class GridBotService:
                 if cum_quote > 0:
                     bo_commission = cum_quote * 0.0004  # taker fee estimate
 
-            logger.info(f"BO fill: qty={bo_filled_qty}, avg_price={bo_avg_price:.4f}, commission={bo_commission:.6f}")
+            logger.info(
+                f"BO fill: qty={bo_filled_qty}, avg_price={bo_avg_price:.4f}, commission={bo_commission:.6f}"
+            )
 
             bo_order = Order(
                 basket_id=basket.id,
@@ -1732,8 +1899,8 @@ class GridBotService:
                 filled_qty=bo_filled_qty,
                 avg_fill_price=bo_avg_price,
                 commission=bo_commission,
-                filled_at=datetime.now(timezone.utc),
-                raw_response=bo_response
+                filled_at=datetime.now(UTC),
+                raw_response=bo_response,
             )
             session.add(bo_order)
 
@@ -1771,7 +1938,7 @@ class GridBotService:
                 qty=tp_qty,
                 price=tp_price,
                 status="NEW",
-                raw_response=tp_response
+                raw_response=tp_response,
             )
             session.add(tp_order)
 
@@ -1796,20 +1963,28 @@ class GridBotService:
                 logger.warning(f"Could not calculate liquidation price: {e}")
 
             await session.commit()
-            logger.info(f"✅ Basket {basket.id} OPENED: side={side}, bo_qty={bo_qty}, "
-                       f"bo_margin=${bo['margin']:.4f}, tp={tp_price}")
+            logger.info(
+                f"✅ Basket {basket.id} OPENED: side={side}, bo_qty={bo_qty}, "
+                f"bo_margin=${bo['margin']:.4f}, tp={tp_price}"
+            )
 
             # Send basket opened email + Telegram
             try:
+                from app.models.user import User
                 from app.services.notification_service import notification_service
+
                 user_result = await session.execute(select(User).where(User.id == account.user_id))
                 user_obj = user_result.scalars().first()
                 if user_obj:
                     await notification_service.notify_basket_opened(
-                        user_obj.email, symbol, side,
-                        f"${bo_avg_price:.4f}", f"${bo['margin']:.2f}",
-                        str(config.get('leverage', 10)),
-                        user_id=account.user_id, account_name=account.name,
+                        user_obj.email,
+                        symbol,
+                        side,
+                        f"${bo_avg_price:.4f}",
+                        f"${bo['margin']:.2f}",
+                        str(config.get("leverage", 10)),
+                        user_id=account.user_id,
+                        account_name=account.name,
                     )
             except Exception:
                 pass

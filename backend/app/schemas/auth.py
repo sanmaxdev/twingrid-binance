@@ -60,8 +60,7 @@ class TOTPSetupResponse(BaseModel):
     secret: str
     uri: str
 
-from typing import Optional
 
 class TOTPVerifyRequest(BaseModel):
     code: str
-    secret: Optional[str] = None
+    secret: str | None = None

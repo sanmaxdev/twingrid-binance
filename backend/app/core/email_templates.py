@@ -58,8 +58,8 @@ def _otp_block(otp: str) -> str:
     """Render a large, centered 6-digit OTP code."""
     digits = "".join(
         f'<td style="width:44px;height:52px;text-align:center;font-size:28px;font-weight:800;'
-        f'color:#EAECEF;background-color:#0B0E11;border:2px solid #F0B90B;border-radius:10px;'
-        f'font-family:\'Courier New\',monospace;letter-spacing:2px;">{d}</td>'
+        f"color:#EAECEF;background-color:#0B0E11;border:2px solid #F0B90B;border-radius:10px;"
+        f"font-family:'Courier New',monospace;letter-spacing:2px;\">{d}</td>"
         for d in otp
     )
     return f"""<div style="text-align:center;margin:28px 0 12px;">
@@ -153,7 +153,9 @@ You can now log in and resume trading:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 6. Basket Opened
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def basket_opened_email(symbol: str, side: str, entry: str, margin: str, leverage: str) -> tuple[str, str]:
+def basket_opened_email(
+    symbol: str, side: str, entry: str, margin: str, leverage: str
+) -> tuple[str, str]:
     side_color = "#0ECB81" if side == "LONG" else "#F6465D"
     body = f"""
 <p style="margin:0 0 16px;font-size:14px;color:#848E9C;line-height:1.6;">
@@ -245,19 +247,30 @@ Your Twin Grid balance is running low:
 # 11. Position Closed Externally (Manual Close / Liquidation / ADL)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def position_closed_externally_email(
-    symbol: str, side: str, exit_reason: str,
-    pnl: str, fees: str, duration: str
+    symbol: str, side: str, exit_reason: str, pnl: str, fees: str, duration: str
 ) -> tuple[str, str]:
     reason_map = {
-        "MANUAL_CLOSE": ("⚠️", "Closed on Binance", "#F0B90B",
-                         "This position was closed directly on the Binance platform, not by Twin Grid. "
-                         "All orphan orders have been automatically canceled."),
-        "LIQUIDATION": ("🚨", "Liquidation", "#F6465D",
-                        "This position was liquidated by the exchange due to insufficient margin. "
-                        "Please review your leverage and risk settings."),
-        "ADL": ("⚡", "Auto-Deleveraging", "#F6465D",
-                "This position was closed by Binance's Auto-Deleveraging system. "
-                "This occurs when the insurance fund is insufficient."),
+        "MANUAL_CLOSE": (
+            "⚠️",
+            "Closed on Binance",
+            "#F0B90B",
+            "This position was closed directly on the Binance platform, not by Twin Grid. "
+            "All orphan orders have been automatically canceled.",
+        ),
+        "LIQUIDATION": (
+            "🚨",
+            "Liquidation",
+            "#F6465D",
+            "This position was liquidated by the exchange due to insufficient margin. "
+            "Please review your leverage and risk settings.",
+        ),
+        "ADL": (
+            "⚡",
+            "Auto-Deleveraging",
+            "#F6465D",
+            "This position was closed by Binance's Auto-Deleveraging system. "
+            "This occurs when the insurance fund is insufficient.",
+        ),
     }
     emoji, reason_label, color, explanation = reason_map.get(
         exit_reason, ("⚠️", exit_reason, "#F0B90B", "This position was closed externally.")
@@ -300,19 +313,26 @@ def risk_stop_email(
 {_stat_row("Side", side, side_color)}
 {_stat_row("SOs Filled", sos_filled)}
 {_stat_row("Realized PnL", pnl, pnl_color)}
-{_stat_row("Trigger", trigger_reason.split(":")[0] if ":" in trigger_reason else trigger_reason, "#F0B90B")}
+{
+        _stat_row(
+            "Trigger",
+            trigger_reason.split(":")[0] if ":" in trigger_reason else trigger_reason,
+            "#F0B90B",
+        )
+    }
 </table>
-{_info_box(
-    "The Risk Controller closed this basket before it could reach liquidation. "
-    "This is a controlled loss to preserve your capital. "
-    "Review your risk settings in Account Settings if you want to adjust thresholds.",
-    "#F0B90B"
-)}"""
+{
+        _info_box(
+            "The Risk Controller closed this basket before it could reach liquidation. "
+            "This is a controlled loss to preserve your capital. "
+            "Review your risk settings in Account Settings if you want to adjust thresholds.",
+            "#F0B90B",
+        )
+    }"""
     return (
         f"🛡️ Risk Stop — {symbol} {pnl}",
         _base_template("🛡️ Risk Controller Triggered", body),
     )
-
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -327,7 +347,13 @@ def subscription_activated_email(
     max_accounts: str,
     app_url: str,
 ) -> tuple[str, str]:
-    plan_color = "#F0B90B" if plan_name.lower() == "pro" else "#A855F7" if plan_name.lower() == "elite" else "#848E9C"
+    plan_color = (
+        "#F0B90B"
+        if plan_name.lower() == "pro"
+        else "#A855F7"
+        if plan_name.lower() == "elite"
+        else "#848E9C"
+    )
     badge = f'<span style="display:inline-block;padding:2px 10px;background:{plan_color}20;border:1px solid {plan_color}40;border-radius:20px;color:{plan_color};font-size:11px;font-weight:700;">{plan_name.upper()}</span>'
     body = f"""
 <p style="margin:0 0 16px;font-size:14px;color:#848E9C;line-height:1.6;">
@@ -343,7 +369,9 @@ Your Twin Grid subscription has been activated! {badge}
 </table>
 {_info_box("💡 Billing is deducted from your TwinGrid Wallet balance each month. Keep your wallet topped up to maintain uninterrupted access.", "#0ECB81")}
 {_button("Go to Dashboard", app_url)}"""
-    return f"✅ {plan_name} Subscription Activated", _base_template(f"Welcome to {plan_name}!", body)
+    return f"✅ {plan_name} Subscription Activated", _base_template(
+        f"Welcome to {plan_name}!", body
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -425,7 +453,7 @@ Your <strong style="color:#F0B90B;">{old_plan_name}</strong> subscription has en
 On the Free plan, you can connect 1 Binance account with a 25% profit share. Backtest Engine and AI Strategy Builder access has been suspended.
 </p>
 {_button("Reactivate Subscription", f"{app_url}/dashboard/subscription")}"""
-    return f"📉 Downgraded to Free Plan", _base_template("Plan Downgraded", body)
+    return "📉 Downgraded to Free Plan", _base_template("Plan Downgraded", body)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

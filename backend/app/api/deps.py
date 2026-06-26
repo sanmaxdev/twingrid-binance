@@ -1,19 +1,22 @@
 """FastAPI dependencies — auth, tenant scope, role guards."""
 
-from typing import AsyncGenerator, Annotated
-from fastapi import Depends, HTTPException, status, Request
+from collections.abc import AsyncGenerator
+from typing import Annotated
+
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from jose import JWTError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
+from app.core.enums import Role, WorkspaceRole
 from app.core.security import verify_token
-from app.core.enums import Role
 from app.models.user import User
+from app.models.workspace_member import WorkspaceMember
 from app.services.tenant_scope import TenantScope
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
+
 
 async def get_token_from_header_or_cookie(request: Request) -> str:
     auth = request.headers.get("Authorization")
@@ -28,6 +31,7 @@ async def get_token_from_header_or_cookie(request: Request) -> str:
         headers={"WWW-Authenticate": "Bearer"},
     )
 
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
@@ -38,8 +42,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def get_current_user(
-    token: str = Depends(get_token_from_header_or_cookie),
-    db: AsyncSession = Depends(get_db)
+    token: str = Depends(get_token_from_header_or_cookie), db: AsyncSession = Depends(get_db)
 ) -> User:
     """Validate JWT and return the current user."""
     credentials_exception = HTTPException(
@@ -58,9 +61,10 @@ async def get_current_user(
 
     try:
         import uuid
+
         user_id = uuid.UUID(user_id_str)
     except ValueError:
-        raise credentials_exception
+        raise credentials_exception from None
 
     result = await db.execute(select(User).where(User.id == user_id, User.deleted_at == None))
     user = result.scalars().first()
@@ -84,14 +88,17 @@ def get_tenant_scope(current_user: User = Depends(get_current_user)) -> TenantSc
 
 def require_role(*allowed_roles: Role):
     """Dependency factory: require the current user to have one of the specified roles."""
+
     def role_checker(current_user: User = Depends(get_current_user)) -> User:
-        user_role = Role(current_user.role) if isinstance(current_user.role, str) else current_user.role
+        user_role = (
+            Role(current_user.role) if isinstance(current_user.role, str) else current_user.role
+        )
         if user_role not in allowed_roles:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions"
+                status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions"
             )
         return current_user
+
     return role_checker
 
 
@@ -107,32 +114,31 @@ def require_super_admin(current_user: User = Depends(get_current_user)) -> User:
     """Require SUPER_ADMIN role."""
     user_role = Role(current_user.role) if isinstance(current_user.role, str) else current_user.role
     if user_role != Role.SUPER_ADMIN:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required"
+        )
     return current_user
 
 
 # Workspace-related deps (backward compat)
-from fastapi import Header
-from app.models.workspace_member import WorkspaceMember
-from app.core.enums import WorkspaceRole
 
 
 async def get_current_workspace_member(
     x_workspace_id: Annotated[str, Header()],
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ) -> WorkspaceMember:
     """Resolve workspace membership from header."""
     import uuid
+
     try:
         workspace_id = uuid.UUID(x_workspace_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid workspace ID format")
+        raise HTTPException(status_code=400, detail="Invalid workspace ID format") from None
 
     result = await db.execute(
         select(WorkspaceMember).where(
-            WorkspaceMember.workspace_id == workspace_id,
-            WorkspaceMember.user_id == current_user.id
+            WorkspaceMember.workspace_id == workspace_id, WorkspaceMember.user_id == current_user.id
         )
     )
     member = result.scalars().first()
@@ -144,8 +150,10 @@ async def get_current_workspace_member(
 
 def require_workspace_role(allowed_roles: list[WorkspaceRole]):
     """Require specific workspace role."""
+
     def role_checker(member: WorkspaceMember = Depends(get_current_workspace_member)):
         if member.role not in allowed_roles:
             raise HTTPException(status_code=403, detail="Insufficient workspace permissions")
         return member
+
     return role_checker

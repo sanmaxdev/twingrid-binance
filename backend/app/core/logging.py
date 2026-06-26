@@ -1,7 +1,7 @@
-import structlog
 import logging
 from collections import deque
-from app.core.config import settings
+
+import structlog
 
 
 class MemoryLogHandler(logging.Handler):
@@ -42,8 +42,7 @@ def setup_logging():
         processors=[
             structlog.stdlib.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer()
+            structlog.processors.JSONRenderer(),
         ],
         logger_factory=structlog.stdlib.LoggerFactory(),
     )
-

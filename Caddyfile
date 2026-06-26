@@ -1,11 +1,17 @@
 # TWIN GRID Console — Production Caddy Config
-# Cloudflare SSL mode: Full (accepts self-signed origin certs)
-# Using tls internal (Caddy self-signed) — no Let's Encrypt renewal failures.
-# Cloudflare handles public TLS for users; Caddy handles Cloudflare→EC2 leg.
+#
+# Set your domain(s) via the SITE_DOMAIN environment variable, e.g.
+#   SITE_DOMAIN="example.com, www.example.com"
+# Defaults to :80 (plain HTTP) for local use if SITE_DOMAIN is unset.
+#
+# TLS: `tls internal` issues a self-signed cert (works behind Cloudflare "Full"
+# mode or another terminating proxy). Remove that line to let Caddy obtain a
+# public Let's Encrypt cert automatically for a real domain.
 
-twingridbot.com, www.twingridbot.com {
+{$SITE_DOMAIN::80} {
 
-    # Self-signed cert — works with Cloudflare Full mode, no renewal failures
+    # Self-signed cert — works behind Cloudflare "Full" mode or another proxy.
+    # Comment this out to use automatic Let's Encrypt certificates instead.
     tls internal
 
     # Request body size limit

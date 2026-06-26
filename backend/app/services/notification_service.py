@@ -1,26 +1,26 @@
 """Notification service — Telegram + email alerts for critical events per §18."""
 
-import structlog
 import httpx
-from typing import Optional
+import structlog
+
 from app.core.config import settings
 from app.core.email import send_email
 from app.core.email_templates import (
-    login_alert_email,
     account_suspended_email,
     account_unsuspended_email,
-    basket_opened_email,
     basket_closed_email,
-    fee_deducted_email,
+    basket_opened_email,
     deposit_credited_email,
+    fee_deducted_email,
+    login_alert_email,
     low_balance_email,
     position_closed_externally_email,
     risk_stop_email,
     subscription_activated_email,
-    subscription_renewed_email,
-    subscription_payment_failed_email,
-    subscription_downgraded_email,
     subscription_cancelled_email,
+    subscription_downgraded_email,
+    subscription_payment_failed_email,
+    subscription_renewed_email,
 )
 
 logger = structlog.get_logger()
@@ -46,7 +46,10 @@ def is_event_enabled(event_name: str) -> bool:
 # TELEGRAM RICH MESSAGE TEMPLATES
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _tg_basket_opened(account_name: str, symbol: str, side: str, entry: str, margin: str, leverage: str) -> str:
+
+def _tg_basket_opened(
+    account_name: str, symbol: str, side: str, entry: str, margin: str, leverage: str
+) -> str:
     side_emoji = "🔼" if side.upper() == "LONG" else "🔽"
     return (
         f"🟢 <b>BASKET OPENED</b>\n"
@@ -61,7 +64,9 @@ def _tg_basket_opened(account_name: str, symbol: str, side: str, entry: str, mar
     )
 
 
-def _tg_basket_closed(account_name: str, symbol: str, side: str, pnl: str, fees: str, duration: str, exit_reason: str) -> str:
+def _tg_basket_closed(
+    account_name: str, symbol: str, side: str, pnl: str, fees: str, duration: str, exit_reason: str
+) -> str:
     pnl_float = float(pnl.replace("$", "").replace("+", "").replace(",", ""))
     pnl_emoji = "✅" if pnl_float >= 0 else "🔴"
     reason_map = {
@@ -90,7 +95,15 @@ def _tg_basket_closed(account_name: str, symbol: str, side: str, pnl: str, fees:
     )
 
 
-def _tg_safety_order(account_name: str, symbol: str, side: str, so_number: str, fill_price: str, new_avg: str, total_qty: str) -> str:
+def _tg_safety_order(
+    account_name: str,
+    symbol: str,
+    side: str,
+    so_number: str,
+    fill_price: str,
+    new_avg: str,
+    total_qty: str,
+) -> str:
     return (
         f"🔵 <b>SAFETY ORDER FILLED</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -105,7 +118,9 @@ def _tg_safety_order(account_name: str, symbol: str, side: str, so_number: str, 
     )
 
 
-def _tg_risk_stop(account_name: str, symbol: str, side: str, pnl: str, sos_filled: str, reason: str) -> str:
+def _tg_risk_stop(
+    account_name: str, symbol: str, side: str, pnl: str, sos_filled: str, reason: str
+) -> str:
     return (
         f"🛡️ <b>RISK STOP TRIGGERED</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -119,7 +134,9 @@ def _tg_risk_stop(account_name: str, symbol: str, side: str, pnl: str, sos_fille
     )
 
 
-def _tg_external_close(account_name: str, symbol: str, side: str, exit_reason: str, pnl: str, fees: str, duration: str) -> str:
+def _tg_external_close(
+    account_name: str, symbol: str, side: str, exit_reason: str, pnl: str, fees: str, duration: str
+) -> str:
     reason_map = {
         "TP_FILLED": "✅ Take Profit",
         "MANUAL_CLOSE": "👤 Manual Close",
@@ -145,7 +162,9 @@ def _tg_external_close(account_name: str, symbol: str, side: str, exit_reason: s
     )
 
 
-def _tg_fee_deducted(account_name: str, fee_amount: str, fee_pct: str, basket_pnl: str, balance_after: str) -> str:
+def _tg_fee_deducted(
+    account_name: str, fee_amount: str, fee_pct: str, basket_pnl: str, balance_after: str
+) -> str:
     return (
         f"💰 <b>FEE DEDUCTED</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -182,6 +201,7 @@ def _tg_low_balance(balance: str, min_required: str) -> str:
 # NOTIFICATION SERVICE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 class NotificationService:
     """Sends alerts via Telegram and/or email for critical system events."""
 
@@ -197,11 +217,14 @@ class NotificationService:
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(url, json={
-                    "chat_id": self.telegram_chat_id,
-                    "text": message,
-                    "parse_mode": "HTML",
-                })
+                resp = await client.post(
+                    url,
+                    json={
+                        "chat_id": self.telegram_chat_id,
+                        "text": message,
+                        "parse_mode": "HTML",
+                    },
+                )
                 if resp.status_code != 200:
                     logger.error("telegram_send_failed", status=resp.status_code, body=resp.text)
         except Exception as e:
@@ -213,14 +236,16 @@ class NotificationService:
             return
 
         try:
+            from sqlalchemy import select
+
             from app.core.database import AsyncSessionLocal
             from app.models.user import User
-            from sqlalchemy import select
 
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
-                    select(User.telegram_chat_id, User.telegram_notifications)
-                    .where(User.id == user_id)
+                    select(User.telegram_chat_id, User.telegram_notifications).where(
+                        User.id == user_id
+                    )
                 )
                 row = result.first()
                 if not row or not row.telegram_chat_id:
@@ -232,17 +257,20 @@ class NotificationService:
                     return
 
                 from app.core.telegram_bot import send_message
+
                 await send_message(row.telegram_chat_id, message)
 
         except Exception as e:
-            logger.warning("user_telegram_failed", user_id=str(user_id), event=event_key, error=str(e))
+            logger.warning(
+                "user_telegram_failed", user_id=str(user_id), event=event_key, error=str(e)
+            )
 
     async def send_alert(
         self,
         title: str,
         message: str,
         severity: str = "INFO",
-        email_to: Optional[str] = None,
+        email_to: str | None = None,
     ):
         """Send a multi-channel alert (admin only)."""
         emoji_map = {
@@ -332,9 +360,15 @@ class NotificationService:
             logger.error("notify_unsuspended_failed", error=str(e))
 
     async def notify_basket_opened(
-        self, email: str, symbol: str, side: str,
-        entry: str, margin: str, leverage: str,
-        user_id=None, account_name: str = "Account",
+        self,
+        email: str,
+        symbol: str,
+        side: str,
+        entry: str,
+        margin: str,
+        leverage: str,
+        user_id=None,
+        account_name: str = "Account",
     ):
         """Event 6: Basket opened — email + per-user Telegram."""
         if not is_event_enabled("basket_opened"):
@@ -351,9 +385,16 @@ class NotificationService:
             await self.send_user_telegram(user_id, "basket_opened", tg_msg)
 
     async def notify_basket_closed(
-        self, email: str, symbol: str, side: str,
-        pnl: str, fees: str, duration: str, exit_reason: str,
-        user_id=None, account_name: str = "Account",
+        self,
+        email: str,
+        symbol: str,
+        side: str,
+        pnl: str,
+        fees: str,
+        duration: str,
+        exit_reason: str,
+        user_id=None,
+        account_name: str = "Account",
     ):
         """Event 7: Basket closed — email + per-user Telegram."""
         if not is_event_enabled("basket_closed"):
@@ -370,18 +411,32 @@ class NotificationService:
             await self.send_user_telegram(user_id, "basket_closed", tg_msg)
 
     async def notify_safety_order_filled(
-        self, user_id, account_name: str, symbol: str, side: str,
-        so_number: str, fill_price: str, new_avg: str, total_qty: str,
+        self,
+        user_id,
+        account_name: str,
+        symbol: str,
+        side: str,
+        so_number: str,
+        fill_price: str,
+        new_avg: str,
+        total_qty: str,
     ):
         """Event: Safety order filled — Telegram only (no email)."""
         if user_id:
-            tg_msg = _tg_safety_order(account_name, symbol, side, so_number, fill_price, new_avg, total_qty)
+            tg_msg = _tg_safety_order(
+                account_name, symbol, side, so_number, fill_price, new_avg, total_qty
+            )
             await self.send_user_telegram(user_id, "safety_order", tg_msg)
 
     async def notify_fee_deducted(
-        self, email: str, fee_amount: str, fee_pct: str,
-        basket_pnl: str, balance_after: str,
-        user_id=None, account_name: str = "Account",
+        self,
+        email: str,
+        fee_amount: str,
+        fee_pct: str,
+        basket_pnl: str,
+        balance_after: str,
+        user_id=None,
+        account_name: str = "Account",
     ):
         """Event 8: Fee deducted."""
         if not is_event_enabled("fee_deducted"):
@@ -396,8 +451,9 @@ class NotificationService:
             tg_msg = _tg_fee_deducted(account_name, fee_amount, fee_pct, basket_pnl, balance_after)
             await self.send_user_telegram(user_id, "fee_deducted", tg_msg)
 
-    async def notify_deposit_credited(self, email: str, amount: str, balance_after: str,
-                                       user_id=None):
+    async def notify_deposit_credited(
+        self, email: str, amount: str, balance_after: str, user_id=None
+    ):
         """Event 9: Deposit credited."""
         if not is_event_enabled("deposit_credited"):
             return
@@ -411,8 +467,7 @@ class NotificationService:
             tg_msg = _tg_deposit_credited(amount, balance_after)
             await self.send_user_telegram(user_id, "deposit_credited", tg_msg)
 
-    async def notify_low_balance(self, email: str, balance: str, min_required: str,
-                                  user_id=None):
+    async def notify_low_balance(self, email: str, balance: str, min_required: str, user_id=None):
         """Event 10: Low balance warning."""
         if not is_event_enabled("low_balance"):
             return
@@ -427,9 +482,16 @@ class NotificationService:
             await self.send_user_telegram(user_id, "low_balance", tg_msg)
 
     async def notify_position_closed_externally(
-        self, email: str, symbol: str, side: str,
-        exit_reason: str, pnl: str, fees: str, duration: str,
-        user_id=None, account_name: str = "Account",
+        self,
+        email: str,
+        symbol: str,
+        side: str,
+        exit_reason: str,
+        pnl: str,
+        fees: str,
+        duration: str,
+        user_id=None,
+        account_name: str = "Account",
     ):
         """Event 11: Position closed externally (manual close / liquidation / ADL)."""
         if not is_event_enabled("position_closed_externally"):
@@ -443,21 +505,27 @@ class NotificationService:
             logger.error("notify_position_closed_externally_failed", error=str(e))
 
         if user_id:
-            tg_msg = _tg_external_close(account_name, symbol, side, exit_reason, pnl, fees, duration)
+            tg_msg = _tg_external_close(
+                account_name, symbol, side, exit_reason, pnl, fees, duration
+            )
             await self.send_user_telegram(user_id, "external_close", tg_msg)
 
     async def notify_risk_stop(
-        self, email: str, symbol: str, side: str,
-        pnl: str, sos_filled: str, trigger_reason: str,
-        user_id=None, account_name: str = "Account",
+        self,
+        email: str,
+        symbol: str,
+        side: str,
+        pnl: str,
+        sos_filled: str,
+        trigger_reason: str,
+        user_id=None,
+        account_name: str = "Account",
     ):
         """Event 12: Risk controller force-closed a basket."""
         if not is_event_enabled("risk_stop"):
             return
         try:
-            subject, html = risk_stop_email(
-                symbol, side, pnl, sos_filled, trigger_reason
-            )
+            subject, html = risk_stop_email(symbol, side, pnl, sos_filled, trigger_reason)
             await send_email(email, subject, html)
         except Exception as e:
             logger.error("notify_risk_stop_failed", error=str(e))
@@ -485,8 +553,12 @@ class NotificationService:
             return
         try:
             subject, html = subscription_activated_email(
-                display_name, plan_name, amount_charged,
-                next_billing, fee_pct, max_accounts,
+                display_name,
+                plan_name,
+                amount_charged,
+                next_billing,
+                fee_pct,
+                max_accounts,
                 settings.APP_PUBLIC_URL,
             )
             await send_email(email, subject, html)
@@ -507,8 +579,11 @@ class NotificationService:
             return
         try:
             subject, html = subscription_renewed_email(
-                display_name, plan_name, amount_charged,
-                next_billing, balance_after,
+                display_name,
+                plan_name,
+                amount_charged,
+                next_billing,
+                balance_after,
                 settings.APP_PUBLIC_URL,
             )
             await send_email(email, subject, html)
@@ -529,8 +604,11 @@ class NotificationService:
             return
         try:
             subject, html = subscription_payment_failed_email(
-                display_name, plan_name, amount_due,
-                current_balance, grace_period_end,
+                display_name,
+                plan_name,
+                amount_due,
+                current_balance,
+                grace_period_end,
                 settings.APP_PUBLIC_URL,
             )
             await send_email(email, subject, html)
@@ -549,7 +627,9 @@ class NotificationService:
             return
         try:
             subject, html = subscription_downgraded_email(
-                display_name, old_plan_name, reason,
+                display_name,
+                old_plan_name,
+                reason,
                 settings.APP_PUBLIC_URL,
             )
             await send_email(email, subject, html)
@@ -568,7 +648,9 @@ class NotificationService:
             return
         try:
             subject, html = subscription_cancelled_email(
-                display_name, plan_name, access_until,
+                display_name,
+                plan_name,
+                access_until,
                 settings.APP_PUBLIC_URL,
             )
             await send_email(email, subject, html)

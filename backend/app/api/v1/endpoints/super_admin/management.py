@@ -1,52 +1,53 @@
-import uuid
-import logging
 import asyncio
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update
-from typing import List, Dict, Any
+import logging
+import uuid
+from datetime import UTC, datetime
+from typing import Any
 
-from app.api.deps import get_current_user, get_db, require_admin
-from app.models.user import User
-from app.models.workspace import Workspace
-from app.models.account import Account
-from app.models.settings import AccountSettings
-from app.models.platform_settings import PlatformSettings
-from app.models.user_subscription import UserSubscription
-from app.core.enums import Role, AccountStatus
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_db, require_admin
+from app.core.enums import AccountStatus
 from app.core.security import decrypt_secret
+from app.models.account import Account
+from app.models.platform_settings import PlatformSettings
+from app.models.settings import AccountSettings
+from app.models.user import User
+from app.models.user_subscription import UserSubscription
+from app.models.workspace import Workspace
+from app.schemas.account import AccountSettingsUpdate
 from app.services.binance_client import BinanceClient
 from app.services.binance_ws_manager import ws_cache
-from app.schemas.account import AccountSettingsUpdate, AccountSettingsResponse
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-@router.get("/stats", response_model=Dict[str, Any])
+
+@router.get("/stats", response_model=dict[str, Any])
 async def get_system_stats(
-    current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
 ):
     """
     Get high-level system metrics.
     """
     users_count = await db.scalar(select(func.count()).select_from(User))
     workspaces_count = await db.scalar(select(func.count()).select_from(Workspace))
-    accounts_count = await db.scalar(select(func.count()).select_from(Account).where(Account.deleted_at.is_(None)))
+    accounts_count = await db.scalar(
+        select(func.count()).select_from(Account).where(Account.deleted_at.is_(None))
+    )
     active_accounts_count = await db.scalar(
-        select(func.count()).select_from(Account).where(
-            Account.status.in_(["RUNNING"]),
-            Account.deleted_at.is_(None)
-        )
+        select(func.count())
+        .select_from(Account)
+        .where(Account.status.in_(["RUNNING"]), Account.deleted_at.is_(None))
     )
     auto_trade_count = await db.scalar(
-        select(func.count()).select_from(Account).where(
-            Account.auto_trade_enabled == True,
-            Account.deleted_at.is_(None)
-        )
+        select(func.count())
+        .select_from(Account)
+        .where(Account.auto_trade_enabled == True, Account.deleted_at.is_(None))
     )
-    
+
     # Get platform trading status
     result = await db.execute(
         select(PlatformSettings).where(PlatformSettings.key == "trading_enabled")
@@ -55,43 +56,41 @@ async def get_system_stats(
     trading_enabled = False
     if setting:
         trading_enabled = setting.value is True or setting.value == "true"
-    
+
     return {
         "total_users": users_count or 0,
         "total_workspaces": workspaces_count or 0,
         "total_connected_accounts": accounts_count or 0,
         "active_trading_bots": active_accounts_count or 0,
         "auto_trade_enabled_count": auto_trade_count or 0,
-        "platform_trading_enabled": trading_enabled
+        "platform_trading_enabled": trading_enabled,
     }
+
 
 @router.get("/platform-settings")
 async def get_platform_settings(
-    current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
 ):
     """Get all platform settings."""
     result = await db.execute(select(PlatformSettings))
     settings = result.scalars().all()
     return {s.key: s.value for s in settings}
 
+
 @router.post("/platform-settings/trading")
 async def toggle_platform_trading(
-    current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
 ):
     """Toggle the master trading switch on/off."""
     result = await db.execute(
         select(PlatformSettings).where(PlatformSettings.key == "trading_enabled")
     )
     setting = result.scalar_one_or_none()
-    
+
     if not setting:
         # Create the setting
         new_setting = PlatformSettings(
-            key="trading_enabled",
-            value=True,
-            updated_by=current_user.id
+            key="trading_enabled", value=True, updated_by=current_user.id
         )
         db.add(new_setting)
         new_value = True
@@ -99,22 +98,22 @@ async def toggle_platform_trading(
         current_value = setting.value is True or setting.value == "true"
         new_value = not current_value
         setting.value = new_value
-        setting.updated_at = datetime.now(timezone.utc)
+        setting.updated_at = datetime.now(UTC)
         setting.updated_by = current_user.id
-    
+
     await db.commit()
-    
+
     logger.info(f"Platform trading toggled to {new_value} by {current_user.email}")
-    
+
     return {
         "trading_enabled": new_value,
-        "message": f"Platform trading has been {'ENABLED' if new_value else 'DISABLED'}."
+        "message": f"Platform trading has been {'ENABLED' if new_value else 'DISABLED'}.",
     }
+
 
 @router.post("/halt-all")
 async def halt_all_accounts(
-    current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
 ):
     """
     Emergency halt: Disable platform trading + halt all RUNNING accounts.
@@ -126,33 +125,34 @@ async def halt_all_accounts(
     setting = result.scalar_one_or_none()
     if setting:
         setting.value = False
-        setting.updated_at = datetime.now(timezone.utc)
+        setting.updated_at = datetime.now(UTC)
         setting.updated_by = current_user.id
     else:
         db.add(PlatformSettings(key="trading_enabled", value=False, updated_by=current_user.id))
-    
+
     # 2. Halt all running accounts + disable auto-trade
     await db.execute(
         update(Account)
         .where(Account.status == AccountStatus.RUNNING, Account.deleted_at.is_(None))
         .values(status=AccountStatus.HALTED, auto_trade_enabled=False)
     )
-    
+
     await db.commit()
-    
+
     logger.warning(f"EMERGENCY HALT-ALL executed by {current_user.email}")
-    
+
     return {
         "status": "halted",
-        "message": "All trading has been halted. Platform trading is now disabled. All running accounts have been stopped."
+        "message": "All trading has been halted. Platform trading is now disabled. All running accounts have been stopped.",
     }
+
 
 @router.get("/users")
 async def list_all_users(
     skip: int = 0,
     limit: int = 100,
     current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """
     List all users in the system.
@@ -189,19 +189,20 @@ async def list_all_users(
         for u in users
     ]
 
+
 @router.get("/workspaces")
 async def list_all_workspaces(
     skip: int = 0,
     limit: int = 100,
     current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """
     List all workspaces in the system.
     """
     result = await db.execute(select(Workspace).offset(skip).limit(limit))
     workspaces = result.scalars().all()
-    
+
     return [
         {
             "id": str(w.id),
@@ -211,27 +212,27 @@ async def list_all_workspaces(
         for w in workspaces
     ]
 
+
 @router.get("/accounts")
 async def list_all_accounts(
     skip: int = 0,
     limit: int = 100,
     current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """
     List all accounts in the system with owner info.
     """
-    from sqlalchemy.orm import selectinload
     result = await db.execute(
         select(Account).where(Account.deleted_at.is_(None)).offset(skip).limit(limit)
     )
     accounts = result.scalars().all()
-    
+
     # Fetch owner info for each account
     user_ids = list(set(a.user_id for a in accounts))
     user_result = await db.execute(select(User).where(User.id.in_(user_ids)))
     users_map = {u.id: u for u in user_result.scalars().all()}
-    
+
     return [
         {
             "id": str(a.id),
@@ -243,17 +244,20 @@ async def list_all_accounts(
             "workspace_id": str(a.workspace_id),
             "user_id": str(a.user_id),
             "owner_email": users_map[a.user_id].email if a.user_id in users_map else None,
-            "owner_display_name": users_map[a.user_id].display_name if a.user_id in users_map else None,
-            "created_at": a.created_at.isoformat() if a.created_at else None
+            "owner_display_name": users_map[a.user_id].display_name
+            if a.user_id in users_map
+            else None,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
         }
         for a in accounts
     ]
+
 
 @router.get("/accounts/{account_id}/dashboard")
 async def get_account_dashboard_admin(
     account_id: uuid.UUID,
     current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     from app.models.basket import Basket
 
@@ -287,9 +291,7 @@ async def get_account_dashboard_admin(
     }
 
     # Calculate PnL summary from baskets
-    basket_result = await db.execute(
-        select(Basket).where(Basket.account_id == account_id)
-    )
+    basket_result = await db.execute(select(Basket).where(Basket.account_id == account_id))
     all_baskets = basket_result.scalars().all()
 
     # Exclude ERROR baskets from total — they are failed attempts, not real trades
@@ -349,7 +351,7 @@ async def get_account_dashboard_admin(
         recent_trades, income = await asyncio.gather(
             client.get_trade_history(limit=50),
             client.get_income_history(limit=50),
-            return_exceptions=True
+            return_exceptions=True,
         )
 
         # For positions/balances/orders: use cache if available, otherwise REST
@@ -358,7 +360,7 @@ async def get_account_dashboard_admin(
                 client.get_position_info() if cached_positions is None else asyncio.sleep(0),
                 client.get_balances() if cached_balances is None else asyncio.sleep(0),
                 client.get_open_orders() if cached_orders is None else asyncio.sleep(0),
-                return_exceptions=True
+                return_exceptions=True,
             )
         else:
             positions_rest = None
@@ -371,7 +373,9 @@ async def get_account_dashboard_admin(
                 return default
             return res
 
-        positions = cached_positions if cached_positions is not None else handle_res(positions_rest, [])
+        positions = (
+            cached_positions if cached_positions is not None else handle_res(positions_rest, [])
+        )
         balances = cached_balances if cached_balances is not None else handle_res(balances_rest, [])
         open_orders = cached_orders if cached_orders is not None else handle_res(orders_rest, [])
         recent_trades = handle_res(recent_trades, [])
@@ -379,7 +383,11 @@ async def get_account_dashboard_admin(
 
         # Filter out zero balances
         if isinstance(balances, list):
-            balances = [b for b in balances if float(b.get("balance", 0)) > 0 or float(b.get("crossUnRealizedPNL", 0)) != 0]
+            balances = [
+                b
+                for b in balances
+                if float(b.get("balance", 0)) > 0 or float(b.get("crossUnRealizedPNL", 0)) != 0
+            ]
 
         # Filter out zero positions
         if isinstance(positions, list):
@@ -389,28 +397,38 @@ async def get_account_dashboard_admin(
             "account_info": account_info_static,
             "owner": owner_info,
             "account_summary": {
-                "total_wallet_balance": account_info.get("totalWalletBalance", "0") if isinstance(account_info, dict) else "0",
-                "total_unrealized_pnl": account_info.get("totalUnrealizedProfit", "0") if isinstance(account_info, dict) else "0",
-                "total_margin_balance": account_info.get("totalMarginBalance", "0") if isinstance(account_info, dict) else "0",
-                "available_balance": account_info.get("availableBalance", "0") if isinstance(account_info, dict) else "0",
+                "total_wallet_balance": account_info.get("totalWalletBalance", "0")
+                if isinstance(account_info, dict)
+                else "0",
+                "total_unrealized_pnl": account_info.get("totalUnrealizedProfit", "0")
+                if isinstance(account_info, dict)
+                else "0",
+                "total_margin_balance": account_info.get("totalMarginBalance", "0")
+                if isinstance(account_info, dict)
+                else "0",
+                "available_balance": account_info.get("availableBalance", "0")
+                if isinstance(account_info, dict)
+                else "0",
             },
             "pnl_summary": pnl_summary,
             "balances": balances,
             "positions": positions,
             "open_orders": open_orders,
             "recent_trades": recent_trades,
-            "income_history": income
+            "income_history": income,
         }
     except Exception as e:
         logger.error(f"Failed to load dashboard for account {account_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve live data from Binance")
+        raise HTTPException(
+            status_code=500, detail="Failed to retrieve live data from Binance"
+        ) from e
 
 
 @router.get("/accounts/{account_id}/balance")
 async def get_account_balance_admin(
     account_id: uuid.UUID,
     current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Lightweight endpoint: fetch only wallet balance + unrealized PnL for an account.
@@ -452,18 +470,27 @@ async def get_account_balance_admin(
             "total_unrealized_pnl": account_info.get("totalUnrealizedProfit"),
             "available_balance": account_info.get("availableBalance"),
         }
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(f"Balance fetch timed out for account {account_id}")
-        return {"success": False, "total_wallet_balance": None, "total_unrealized_pnl": None, "available_balance": None}
+        return {
+            "success": False,
+            "total_wallet_balance": None,
+            "total_unrealized_pnl": None,
+            "available_balance": None,
+        }
     except Exception as e:
         logger.warning(f"Balance fetch failed for account {account_id}: {e}")
-        return {"success": False, "total_wallet_balance": None, "total_unrealized_pnl": None, "available_balance": None}
+        return {
+            "success": False,
+            "total_wallet_balance": None,
+            "total_unrealized_pnl": None,
+            "available_balance": None,
+        }
 
 
 @router.get("/accounts/balances")
 async def get_all_account_balances(
-    current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
 ):
     """
     Batch balance endpoint: fetch wallet balance + unrealized PnL for ALL
@@ -481,12 +508,11 @@ async def get_all_account_balances(
     Returns: { "balances": { "<account_id>": { ... } | null, ... } }
     """
     import json as _json
+
     from app.core.redis_client import redis_client as _redis
 
     # 1. Load all active accounts from DB, then release the session
-    result = await db.execute(
-        select(Account).where(Account.deleted_at.is_(None))
-    )
+    result = await db.execute(select(Account).where(Account.deleted_at.is_(None)))
     accounts = result.scalars().all()
 
     if not accounts:
@@ -495,12 +521,14 @@ async def get_all_account_balances(
     # Extract all account data we need before closing DB
     account_data = []
     for a in accounts:
-        account_data.append({
-            "id": str(a.id),
-            "api_key": decrypt_secret(a.api_key_encrypted),
-            "api_secret": decrypt_secret(a.api_secret_encrypted),
-            "is_testnet": a.is_testnet,
-        })
+        account_data.append(
+            {
+                "id": str(a.id),
+                "api_key": decrypt_secret(a.api_key_encrypted),
+                "api_secret": decrypt_secret(a.api_secret_encrypted),
+                "is_testnet": a.is_testnet,
+            }
+        )
 
     # Release DB connection NOW — remaining work is Redis/Binance REST
     await db.close()
@@ -524,8 +552,7 @@ async def get_all_account_balances(
             cache_miss_accounts.append(acct)
 
     logger.info(
-        f"Batch balance: {len(balances_map)} cached, "
-        f"{len(cache_miss_accounts)} cache misses"
+        f"Batch balance: {len(balances_map)} cached, {len(cache_miss_accounts)} cache misses"
     )
 
     # 3. Sequential REST fallback for cache misses (rate-limit safe)
@@ -535,12 +562,11 @@ async def get_all_account_balances(
         aid = acct["id"]
         try:
             client = BinanceClient(
-                api_key=acct["api_key"], api_secret=acct["api_secret"],
+                api_key=acct["api_key"],
+                api_secret=acct["api_secret"],
                 is_testnet=acct["is_testnet"],
             )
-            account_info = await asyncio.wait_for(
-                client.get_account_info(), timeout=12.0
-            )
+            account_info = await asyncio.wait_for(client.get_account_info(), timeout=12.0)
             balances_map[aid] = {
                 "success": True,
                 "total_wallet_balance": account_info.get("totalWalletBalance"),
@@ -557,7 +583,8 @@ async def get_all_account_balances(
                     "totalMarginBalance": account_info.get("totalMarginBalance", "0"),
                 }
                 await _redis.setex(
-                    f"ws:account:{aid}:account_info", 300,
+                    f"ws:account:{aid}:account_info",
+                    300,
                     _json.dumps(summary),
                 )
             except Exception:
@@ -594,10 +621,10 @@ async def close_account_position_admin(
     account_id: uuid.UUID,
     symbol: str,
     current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
-    from app.models.basket import Basket
     from app.core.enums import BasketStatus
+    from app.models.basket import Basket
 
     account = await db.get(Account, account_id)
     if not account or account.deleted_at:
@@ -610,7 +637,7 @@ async def close_account_position_admin(
     try:
         # Cancel all open orders for symbol first
         await client.cancel_all_orders(symbol)
-        
+
         # Get positions to find the exact quantity to close
         positions = await client.get_position_info(symbol)
         position = next((p for p in positions if p.get("symbol") == symbol), None)
@@ -620,58 +647,57 @@ async def close_account_position_admin(
             if amt != 0:
                 side = "SELL" if amt > 0 else "BUY"
                 abs_amt = abs(amt)
-                
+
                 # Execute MARKET order to close
                 await client.place_market_order(
-                    symbol=symbol,
-                    side=side,
-                    quantity=abs_amt,
-                    reduce_only=True
+                    symbol=symbol, side=side, quantity=abs_amt, reduce_only=True
                 )
-                logger.info(f"Admin manually closed position for {symbol} on account {account_id}. Size: {amt}")
-        
+                logger.info(
+                    f"Admin manually closed position for {symbol} on account {account_id}. Size: {amt}"
+                )
+
         # Close any open baskets in the DB
         from app.models.order import Order
         from app.services.grid_bot import GridBotService
-        
+
         stmt = select(Basket).where(
             Basket.account_id == account_id,
             Basket.symbol == symbol,
-            Basket.status.in_([BasketStatus.OPEN, BasketStatus.OPENING])
+            Basket.status.in_([BasketStatus.OPEN, BasketStatus.OPENING]),
         )
         result = await db.execute(stmt)
         baskets = result.scalars().all()
         for basket in baskets:
             basket.status = BasketStatus.CLOSED
             basket.exit_reason = "MANUALLY_CLOSED_BY_ADMIN"
-            basket.closed_at = datetime.now(timezone.utc)
-            
+            basket.closed_at = datetime.now(UTC)
+
             # Cancel local DB pending orders
             stmt_pending = select(Order).where(
-                Order.basket_id == basket.id,
-                Order.status.in_(["NEW", "PARTIALLY_FILLED"])
+                Order.basket_id == basket.id, Order.status.in_(["NEW", "PARTIALLY_FILLED"])
             )
             result_pending = await db.execute(stmt_pending)
             for order in result_pending.scalars().all():
                 order.status = "CANCELED"
-                
+
             # Trigger fee deduction and affiliate commissions
             bot = GridBotService(account_id)
             await bot._finalize_basket(db, client, basket, symbol)
-            
+
         await db.commit()
 
         return {"success": True, "message": f"Successfully closed position for {symbol}."}
 
     except Exception as e:
         logger.error(f"Failed to manually close position {symbol} for account {account_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
 
 @router.get("/accounts/{account_id}/settings")
 async def get_account_settings_admin(
     account_id: uuid.UUID,
     current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Admin: get trading settings for any account."""
     account = await db.get(Account, account_id)
@@ -683,7 +709,13 @@ async def get_account_settings_admin(
     settings = result.scalars().first()
 
     if not settings:
-        return {"account_id": str(account_id), "config": {}, "version": 0, "updated_at": None, "updated_by": None}
+        return {
+            "account_id": str(account_id),
+            "config": {},
+            "version": 0,
+            "updated_at": None,
+            "updated_by": None,
+        }
 
     return {
         "account_id": str(settings.account_id),
@@ -699,7 +731,7 @@ async def update_account_settings_admin(
     account_id: uuid.UUID,
     settings_in: AccountSettingsUpdate,
     current_user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Admin: overwrite trading settings for any account (bypasses workspace checks)."""
     account = await db.get(Account, account_id)
@@ -712,9 +744,7 @@ async def update_account_settings_admin(
 
     if not settings:
         settings = AccountSettings(
-            account_id=account_id,
-            config=settings_in.config,
-            updated_by=current_user.id
+            account_id=account_id, config=settings_in.config, updated_by=current_user.id
         )
         db.add(settings)
     else:
@@ -742,16 +772,24 @@ async def update_account_settings_admin(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 EMAIL_EVENTS = [
-    "welcome", "login_alert", "password_reset",
-    "account_suspended", "account_unsuspended",
-    "basket_opened", "basket_closed",
-    "fee_deducted", "deposit_credited", "low_balance",
+    "welcome",
+    "login_alert",
+    "password_reset",
+    "account_suspended",
+    "account_unsuspended",
+    "basket_opened",
+    "basket_closed",
+    "fee_deducted",
+    "deposit_credited",
+    "low_balance",
     "position_closed_externally",
     # Subscription lifecycle
-    "subscription_activated", "subscription_renewed",
-    "subscription_payment_failed", "subscription_downgraded", "subscription_cancelled",
+    "subscription_activated",
+    "subscription_renewed",
+    "subscription_payment_failed",
+    "subscription_downgraded",
+    "subscription_cancelled",
 ]
-
 
 
 @router.get("/email/settings")
@@ -793,9 +831,7 @@ async def update_email_settings(
         if event not in EMAIL_EVENTS:
             continue
         key = f"email_event_{event}"
-        result = await db.execute(
-            select(PlatformSettings).where(PlatformSettings.key == key)
-        )
+        result = await db.execute(select(PlatformSettings).where(PlatformSettings.key == key))
         setting = result.scalar_one_or_none()
         if setting:
             setting.value = {"enabled": bool(enabled)}
@@ -808,6 +844,7 @@ async def update_email_settings(
     # Update in-memory cache
     try:
         from app.services.notification_service import update_disabled_events
+
         update_disabled_events(all_events)
     except Exception:
         pass
@@ -823,11 +860,8 @@ async def get_email_logs(
 ):
     """Get email send log from database."""
     from app.models.email_log import EmailLog
-    result = await db.execute(
-        select(EmailLog)
-        .order_by(EmailLog.created_at.desc())
-        .limit(limit)
-    )
+
+    result = await db.execute(select(EmailLog).order_by(EmailLog.created_at.desc()).limit(limit))
     logs = result.scalars().all()
     return {
         "logs": [
@@ -853,14 +887,16 @@ async def send_test_email(
     from app.core.email import send_email
     from app.core.email_templates import _base_template
 
-    html = _base_template("Test Email", """
+    html = _base_template(
+        "Test Email",
+        """
 <p style="margin:0 0 16px;font-size:14px;color:#848E9C;line-height:1.6;">
 This is a test email from Twin Grid Console.
 </p>
 <p style="margin:0;font-size:14px;color:#0ECB81;font-weight:600;">
 ✅ Email system is working correctly!
 </p>
-""")
+""",
+    )
     success = await send_email(to, "Twin Grid — Test Email", html)
     return {"detail": "Test email sent" if success else "Failed to send", "success": success}
-

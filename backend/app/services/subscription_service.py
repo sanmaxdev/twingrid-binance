@@ -3,21 +3,22 @@ Subscription Service
 ====================
 Core business logic for plan management, billing, renewals, and enforcement.
 """
-import uuid
-import logging
-from datetime import datetime, timezone, timedelta
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 
-from app.models.user import User
-from app.models.subscription_plan import SubscriptionPlan
-from app.models.user_subscription import UserSubscription
-from app.models.subscription_invoice import SubscriptionInvoice
+import logging
+import uuid
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import AuditAction, FeeTransactionType
 from app.models.fee_transaction import FeeTransaction
+from app.models.subscription_invoice import SubscriptionInvoice
+from app.models.subscription_plan import SubscriptionPlan
+from app.models.user import User
 from app.models.user_backtest_usage import UserBacktestUsage
-from app.core.enums import FeeTransactionType, AuditAction
+from app.models.user_subscription import UserSubscription
 from app.services.audit_service import record_audit
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +27,13 @@ GRACE_PERIOD_DAYS = 3
 
 # ── Plan helpers ──────────────────────────────────────────────────────────────
 
+
 async def get_all_plans(db: AsyncSession) -> list[SubscriptionPlan]:
     """Return all active subscription plans, ordered by sort_order."""
     result = await db.execute(
-        select(SubscriptionPlan).where(SubscriptionPlan.is_active == True).order_by(SubscriptionPlan.sort_order)
+        select(SubscriptionPlan)
+        .where(SubscriptionPlan.is_active == True)
+        .order_by(SubscriptionPlan.sort_order)
     )
     return result.scalars().all()
 
@@ -40,11 +44,10 @@ async def get_plan(db: AsyncSession, plan_id: str) -> SubscriptionPlan | None:
 
 # ── User subscription helpers ─────────────────────────────────────────────────
 
+
 async def get_user_subscription(db: AsyncSession, user_id: uuid.UUID) -> UserSubscription:
     """Get user's subscription. Auto-creates a Free plan subscription if none exists."""
-    result = await db.execute(
-        select(UserSubscription).where(UserSubscription.user_id == user_id)
-    )
+    result = await db.execute(select(UserSubscription).where(UserSubscription.user_id == user_id))
     sub = result.scalar_one_or_none()
 
     if sub is None:
@@ -56,7 +59,7 @@ async def get_user_subscription(db: AsyncSession, user_id: uuid.UUID) -> UserSub
 
 async def _create_free_subscription(db: AsyncSession, user_id: uuid.UUID) -> UserSubscription:
     """Silently create a Free tier subscription for a new user."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sub = UserSubscription(
         user_id=user_id,
         plan_id="free",
@@ -74,12 +77,14 @@ async def _create_free_subscription(db: AsyncSession, user_id: uuid.UUID) -> Use
 async def get_user_plan(db: AsyncSession, user_id: uuid.UUID) -> SubscriptionPlan:
     """Get the effective plan for a user, respecting grace period."""
     sub = await get_user_subscription(db, user_id)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # During grace period, still on old plan
     if sub.status == "grace_period" and sub.grace_period_end and now < sub.grace_period_end:
         plan = await get_plan(db, sub.plan_id)
-    elif sub.status in ("cancelled", "expired") or (sub.status == "grace_period" and (not sub.grace_period_end or now >= sub.grace_period_end)):
+    elif sub.status in ("cancelled", "expired") or (
+        sub.status == "grace_period" and (not sub.grace_period_end or now >= sub.grace_period_end)
+    ):
         plan = await get_plan(db, "free")
     else:
         plan = await get_plan(db, sub.plan_id)
@@ -88,6 +93,7 @@ async def get_user_plan(db: AsyncSession, user_id: uuid.UUID) -> SubscriptionPla
 
 
 # ── Subscribe / Upgrade / Downgrade ──────────────────────────────────────────
+
 
 async def subscribe(
     db: AsyncSession,
@@ -101,7 +107,7 @@ async def subscribe(
     - Sets default fee_percentage_override if admin hasn't set one.
     - Returns dict with result details.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     plan = await get_plan(db, plan_id)
     if not plan:
@@ -175,8 +181,10 @@ async def subscribe(
     # Only admin explicit overrides should touch fee_percentage_override.
 
     await record_audit(
-        db, action=AuditAction.SUBSCRIPTION_CHANGED,
-        actor_user_id=actor_id or user_id, target_user_id=user_id,
+        db,
+        action=AuditAction.SUBSCRIPTION_CHANGED,
+        actor_user_id=actor_id or user_id,
+        target_user_id=user_id,
         payload={"old_plan": old_plan_id, "new_plan": plan_id, "amount": float(plan.price_usd)},
     )
     await db.commit()
@@ -184,6 +192,7 @@ async def subscribe(
     # Send activation email (fire-and-forget)
     try:
         from app.services.notification_service import notification_service
+
         max_acc_label = "Unlimited" if plan.max_accounts is None else str(plan.max_accounts)
         next_billing = (now + timedelta(days=30)).strftime("%b %d, %Y")
         await notification_service.notify_subscription_activated(
@@ -209,6 +218,7 @@ async def subscribe(
 
 # ── Cancel ────────────────────────────────────────────────────────────────────
 
+
 async def cancel_subscription(db: AsyncSession, user_id: uuid.UUID) -> dict:
     """Cancel at period end — user retains access until current_period_end."""
     sub = await get_user_subscription(db, user_id)
@@ -216,11 +226,13 @@ async def cancel_subscription(db: AsyncSession, user_id: uuid.UUID) -> dict:
         return {"success": False, "message": "Free plan cannot be cancelled."}
 
     sub.cancel_at_period_end = True
-    sub.cancelled_at = datetime.now(timezone.utc)
+    sub.cancelled_at = datetime.now(UTC)
 
     await record_audit(
-        db, action=AuditAction.SUBSCRIPTION_CANCELLED,
-        actor_user_id=user_id, target_user_id=user_id,
+        db,
+        action=AuditAction.SUBSCRIPTION_CANCELLED,
+        actor_user_id=user_id,
+        target_user_id=user_id,
         payload={"plan": sub.plan_id, "effective": sub.current_period_end.isoformat()},
     )
     await db.commit()
@@ -228,6 +240,7 @@ async def cancel_subscription(db: AsyncSession, user_id: uuid.UUID) -> dict:
     # Send cancellation confirmation email
     try:
         from app.services.notification_service import notification_service
+
         user_result = await db.execute(select(User).where(User.id == user_id))
         user = user_result.scalar_one_or_none()
         plan = await get_plan(db, sub.plan_id)
@@ -250,6 +263,7 @@ async def cancel_subscription(db: AsyncSession, user_id: uuid.UUID) -> dict:
 
 # ── Renewal (called by scheduler) ────────────────────────────────────────────
 
+
 async def process_renewal(db: AsyncSession, sub: UserSubscription) -> dict:
     """
     Process a subscription renewal attempt.
@@ -257,7 +271,7 @@ async def process_renewal(db: AsyncSession, sub: UserSubscription) -> dict:
     - If insufficient → enter 3-day grace period.
     - If grace period also expired → downgrade to Free.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     user_result = await db.execute(select(User).where(User.id == sub.user_id))
     user = user_result.scalar_one_or_none()
@@ -314,8 +328,10 @@ async def process_renewal(db: AsyncSession, sub: UserSubscription) -> dict:
         sub.updated_at = now
 
         await record_audit(
-            db, action=AuditAction.SUBSCRIPTION_RENEWED,
-            actor_user_id=sub.user_id, target_user_id=sub.user_id,
+            db,
+            action=AuditAction.SUBSCRIPTION_RENEWED,
+            actor_user_id=sub.user_id,
+            target_user_id=sub.user_id,
             payload={"plan": sub.plan_id, "amount": price},
         )
         await db.commit()
@@ -323,6 +339,7 @@ async def process_renewal(db: AsyncSession, sub: UserSubscription) -> dict:
         # Send renewal confirmation email
         try:
             from app.services.notification_service import notification_service
+
             await notification_service.notify_subscription_renewed(
                 email=user.email,
                 display_name=user.display_name or user.email.split("@")[0],
@@ -357,8 +374,10 @@ async def process_renewal(db: AsyncSession, sub: UserSubscription) -> dict:
             db.add(invoice)
 
             await record_audit(
-                db, action=AuditAction.SUBSCRIPTION_FAILED,
-                actor_user_id=sub.user_id, target_user_id=sub.user_id,
+                db,
+                action=AuditAction.SUBSCRIPTION_FAILED,
+                actor_user_id=sub.user_id,
+                target_user_id=sub.user_id,
                 payload={"plan": sub.plan_id, "balance": balance, "required": price},
             )
             await db.commit()
@@ -366,6 +385,7 @@ async def process_renewal(db: AsyncSession, sub: UserSubscription) -> dict:
             # Send payment failed / grace period email
             try:
                 from app.services.notification_service import notification_service
+
                 await notification_service.notify_subscription_payment_failed(
                     email=user.email,
                     display_name=user.display_name or user.email.split("@")[0],
@@ -377,7 +397,11 @@ async def process_renewal(db: AsyncSession, sub: UserSubscription) -> dict:
             except Exception as e:
                 logger.warning(f"Payment failed email failed: {e}")
 
-            return {"success": False, "action": "grace_period_started", "grace_ends": sub.grace_period_end.isoformat()}
+            return {
+                "success": False,
+                "action": "grace_period_started",
+                "grace_ends": sub.grace_period_end.isoformat(),
+            }
 
         elif sub.grace_period_end and now >= sub.grace_period_end:
             # Grace period exhausted — downgrade
@@ -386,9 +410,11 @@ async def process_renewal(db: AsyncSession, sub: UserSubscription) -> dict:
         return {"success": False, "action": "still_in_grace_period"}
 
 
-async def _downgrade_to_free(db: AsyncSession, sub: UserSubscription, user: User, reason: str) -> dict:
+async def _downgrade_to_free(
+    db: AsyncSession, sub: UserSubscription, user: User, reason: str
+) -> dict:
     """Downgrade user to Free plan."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     old_plan = sub.plan_id
     sub.plan_id = "free"
     sub.status = "active"
@@ -402,8 +428,10 @@ async def _downgrade_to_free(db: AsyncSession, sub: UserSubscription, user: User
     user.fee_percentage_override = None
 
     await record_audit(
-        db, action=AuditAction.SUBSCRIPTION_CHANGED,
-        actor_user_id=sub.user_id, target_user_id=sub.user_id,
+        db,
+        action=AuditAction.SUBSCRIPTION_CHANGED,
+        actor_user_id=sub.user_id,
+        target_user_id=sub.user_id,
         payload={"old_plan": old_plan, "new_plan": "free", "reason": reason},
     )
     await db.commit()
@@ -411,6 +439,7 @@ async def _downgrade_to_free(db: AsyncSession, sub: UserSubscription, user: User
     # Send downgrade email
     try:
         from app.services.notification_service import notification_service
+
         old_plan_obj = await get_plan(db, old_plan)
         await notification_service.notify_subscription_downgraded(
             email=user.email,
@@ -426,16 +455,20 @@ async def _downgrade_to_free(db: AsyncSession, sub: UserSubscription, user: User
 
 # ── Feature enforcement ───────────────────────────────────────────────────────
 
+
 async def check_account_limit(db: AsyncSession, user_id: uuid.UUID) -> dict:
     """
     Check if user can add another account under their plan.
     Returns {"allowed": bool, "current": int, "max": int|None, "plan": str}
     """
     from app.models.account import Account
+
     plan = await get_user_plan(db, user_id)
 
     result = await db.execute(
-        select(func.count()).select_from(Account).where(
+        select(func.count())
+        .select_from(Account)
+        .where(
             Account.user_id == user_id,
             Account.deleted_at.is_(None),
         )
@@ -459,10 +492,17 @@ async def check_backtest_access(db: AsyncSession, user_id: uuid.UUID) -> dict:
     Returns {"allowed": bool, "used_today": int, "daily_limit": int|None, "plan": str}
     """
     from datetime import date
+
     plan = await get_user_plan(db, user_id)
 
     if plan.daily_backtest_limit is None:
-        return {"allowed": False, "used_today": 0, "daily_limit": 0, "plan": plan.id, "reason": "no_backtest_access"}
+        return {
+            "allowed": False,
+            "used_today": 0,
+            "daily_limit": 0,
+            "plan": plan.id,
+            "reason": "no_backtest_access",
+        }
 
     today = date.today()
     usage_result = await db.execute(
@@ -487,6 +527,7 @@ async def check_backtest_access(db: AsyncSession, user_id: uuid.UUID) -> dict:
 async def increment_backtest_usage(db: AsyncSession, user_id: uuid.UUID) -> int:
     """Increment today's backtest count and return new total."""
     from datetime import date
+
     today = date.today()
 
     usage_result = await db.execute(

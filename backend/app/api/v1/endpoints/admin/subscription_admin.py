@@ -7,24 +7,26 @@ GET  /admin/subscriptions                   - All user subscriptions (paginated)
 GET  /admin/subscriptions/revenue           - Revenue summary
 PATCH /admin/subscriptions/{user_id}        - Override user's plan
 """
+
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, desc
 
 from app.api.deps import get_db, require_admin, require_super_admin
-from app.models.user import User
-from app.models.subscription_plan import SubscriptionPlan
-from app.models.user_subscription import UserSubscription
 from app.models.subscription_invoice import SubscriptionInvoice
-from app.services.subscription_service import subscribe, get_all_plans, get_plan
-
+from app.models.subscription_plan import SubscriptionPlan
+from app.models.user import User
+from app.models.user_subscription import UserSubscription
+from app.services.subscription_service import get_all_plans, get_plan
 
 router = APIRouter()
 
 
 # ── Plan Management (Super Admin only) ───────────────────────────────────────
+
 
 @router.get("/plans")
 async def admin_list_plans(
@@ -69,16 +71,22 @@ async def admin_update_plan(
         raise HTTPException(404, "Plan not found")
 
     allowed = {
-        "name", "price_usd", "max_accounts", "default_fee_pct",
-        "daily_backtest_limit", "max_backtest_days", "ai_builder_access",
-        "is_active", "description",
+        "name",
+        "price_usd",
+        "max_accounts",
+        "default_fee_pct",
+        "daily_backtest_limit",
+        "max_backtest_days",
+        "ai_builder_access",
+        "is_active",
+        "description",
     }
 
     for field, value in body.items():
         if field in allowed:
             setattr(plan, field, value)
 
-    plan.updated_at = datetime.now(timezone.utc)
+    plan.updated_at = datetime.now(UTC)
     plan.updated_by = admin_user.id
     await db.commit()
     await db.refresh(plan)
@@ -98,6 +106,7 @@ async def admin_update_plan(
 
 
 # ── User Subscription Overview ────────────────────────────────────────────────
+
 
 @router.get("/subscriptions")
 async def admin_list_subscriptions(
@@ -122,14 +131,17 @@ async def admin_list_subscriptions(
         stmt = stmt.where(UserSubscription.status == status)
     if search:
         stmt = stmt.where(
-            (User.email.ilike(f"%{search}%")) |
-            (User.display_name.ilike(f"%{search}%"))
+            (User.email.ilike(f"%{search}%")) | (User.display_name.ilike(f"%{search}%"))
         )
 
     count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
     total = count_result.scalar()
 
-    stmt = stmt.order_by(desc(UserSubscription.updated_at)).offset((page - 1) * per_page).limit(per_page)
+    stmt = (
+        stmt.order_by(desc(UserSubscription.updated_at))
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
     result = await db.execute(stmt)
     rows = result.all()
 
@@ -141,8 +153,12 @@ async def admin_list_subscriptions(
                 "display_name": user.display_name,
                 "plan_id": sub.plan_id,
                 "status": sub.status,
-                "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
-                "grace_period_end": sub.grace_period_end.isoformat() if sub.grace_period_end else None,
+                "current_period_end": sub.current_period_end.isoformat()
+                if sub.current_period_end
+                else None,
+                "grace_period_end": sub.grace_period_end.isoformat()
+                if sub.grace_period_end
+                else None,
                 "cancel_at_period_end": sub.cancel_at_period_end,
                 "started_at": sub.started_at.isoformat() if sub.started_at else None,
                 "updated_at": sub.updated_at.isoformat() if sub.updated_at else None,
@@ -161,21 +177,26 @@ async def admin_revenue_summary(
     db: AsyncSession = Depends(get_db),
 ):
     """Revenue overview: MRR, total collected, plan distribution."""
-    from datetime import timedelta
 
     # Total revenue all time
-    total_rev = (await db.execute(
-        select(func.coalesce(func.sum(SubscriptionInvoice.amount), 0))
-        .where(SubscriptionInvoice.status == "paid")
-    )).scalar()
+    total_rev = (
+        await db.execute(
+            select(func.coalesce(func.sum(SubscriptionInvoice.amount), 0)).where(
+                SubscriptionInvoice.status == "paid"
+            )
+        )
+    ).scalar()
 
     # This month revenue
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    monthly_rev = (await db.execute(
-        select(func.coalesce(func.sum(SubscriptionInvoice.amount), 0))
-        .where(SubscriptionInvoice.status == "paid", SubscriptionInvoice.created_at >= month_start)
-    )).scalar()
+    monthly_rev = (
+        await db.execute(
+            select(func.coalesce(func.sum(SubscriptionInvoice.amount), 0)).where(
+                SubscriptionInvoice.status == "paid", SubscriptionInvoice.created_at >= month_start
+            )
+        )
+    ).scalar()
 
     # Active subscriptions by plan
     plan_counts_result = await db.execute(
@@ -188,9 +209,7 @@ async def admin_revenue_summary(
     # MRR estimate (active paid subs × price)
     plans = await get_all_plans(db)
     mrr = sum(
-        plan_counts.get(p.id, 0) * float(p.price_usd)
-        for p in plans
-        if float(p.price_usd) > 0
+        plan_counts.get(p.id, 0) * float(p.price_usd) for p in plans if float(p.price_usd) > 0
     )
 
     return {
@@ -226,15 +245,19 @@ async def admin_override_subscription(
         raise HTTPException(404, "User not found")
 
     # Update subscription without charging
-    from app.services.subscription_service import get_user_subscription
     from datetime import timedelta
+
+    from app.services.subscription_service import get_user_subscription
+
     sub = await get_user_subscription(db, user_id)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     sub.plan_id = plan_id
     sub.status = "active"
     sub.current_period_start = now
-    sub.current_period_end = now + timedelta(days=30) if float(plan.price_usd) > 0 else now + timedelta(days=36500)
+    sub.current_period_end = (
+        now + timedelta(days=30) if float(plan.price_usd) > 0 else now + timedelta(days=36500)
+    )
     sub.grace_period_end = None
     sub.cancel_at_period_end = False
     sub.updated_at = now

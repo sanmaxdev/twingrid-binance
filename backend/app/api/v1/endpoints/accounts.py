@@ -1,27 +1,34 @@
-import uuid
-import hashlib
-from fastapi import APIRouter, Depends, HTTPException, status
 import asyncio
+import hashlib
 import logging
-from sqlalchemy.ext.asyncio import AsyncSession
+import uuid
+from datetime import UTC
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.database import get_db
 from app.api.deps import get_current_workspace_member
-from app.models.workspace_member import WorkspaceMember
+from app.core.database import get_db
+from app.core.enums import AccountStatus, WorkspaceRole
+from app.core.security import decrypt_secret, encrypt_secret
 from app.models.account import Account
-from app.models.settings import AccountSettings
 from app.models.platform_settings import PlatformSettings
+from app.models.settings import AccountSettings
+from app.models.workspace_member import WorkspaceMember
 from app.schemas.account import (
-    AccountCreate, AccountResponse, AccountUpdate,
-    ConnectionTestRequest, AccountSettingsUpdate, AccountSettingsResponse,
-    AutoTradeToggle, PlatformSettingsResponse
+    AccountCreate,
+    AccountResponse,
+    AccountSettingsResponse,
+    AccountSettingsUpdate,
+    AccountUpdate,
+    AutoTradeToggle,
+    ConnectionTestRequest,
+    PlatformSettingsResponse,
 )
-from app.core.security import encrypt_secret, decrypt_secret
 from app.services.binance_client import BinanceClient
 from app.services.binance_ws_manager import ws_cache
-from app.core.enums import AccountStatus, WorkspaceRole
 
 router = APIRouter()
 
@@ -32,18 +39,18 @@ DEFAULT_STRATEGY_CONFIG = {
     "margin_type": "CROSS",
     "leverage": 10,
     # Sizing
-    "sizing_mode": "fixed_usd",        # "fixed_usd" or "pct_capital"
-    "base_order_usd": 1.0,             # Fixed $1 base order
-    "base_order_pct": 1.0,             # 1% of capital (when in pct mode)
+    "sizing_mode": "fixed_usd",  # "fixed_usd" or "pct_capital"
+    "base_order_usd": 1.0,  # Fixed $1 base order
+    "base_order_pct": 1.0,  # 1% of capital (when in pct mode)
     # Compounding
     "compounding_enabled": False,
-    "compounding_pct": 100,             # 100% = fully proportional to growth
-    "initial_capital": 0,               # Set on first trade if 0
+    "compounding_pct": 100,  # 100% = fully proportional to growth
+    "initial_capital": 0,  # Set on first trade if 0
     # Grid
     "max_safety_orders": 7,
     "take_profit_pct": 1.0,
-    "tp_mode": "pct",                   # "pct" or "fixed"
-    "tp_fixed_amount": 5.0,             # Fixed USD amount when tp_mode="fixed"
+    "tp_mode": "pct",  # "pct" or "fixed"
+    "tp_fixed_amount": 5.0,  # Fixed USD amount when tp_mode="fixed"
     "volume_scale": 1.5,
     "step_scale": 1.35,
     # Signal tuning
@@ -54,21 +61,24 @@ DEFAULT_STRATEGY_CONFIG = {
     "allow_short": True,
 }
 
+
 def _hash_api_key(api_key: str) -> str:
     """Generate a SHA256 hash of the API key for duplicate detection."""
-    return hashlib.sha256(api_key.encode('utf-8')).hexdigest()
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
 
 @router.post("/", response_model=AccountResponse, status_code=status.HTTP_201_CREATED)
 async def create_account(
     account_in: AccountCreate,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     if workspace_member.role not in [WorkspaceRole.OWNER, WorkspaceRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Not enough permissions to add accounts")
 
     # Check subscription account limit
     from app.services.subscription_service import check_account_limit
+
     limit_check = await check_account_limit(db, workspace_member.user_id)
     if not limit_check["allowed"]:
         raise HTTPException(
@@ -90,7 +100,7 @@ async def create_account(
     if existing.scalars().first():
         raise HTTPException(
             status_code=409,
-            detail="This API key is already linked to an account. Each Binance API key can only be connected once."
+            detail="This API key is already linked to an account. Each Binance API key can only be connected once.",
         )
 
     # Encrypt keys
@@ -108,7 +118,7 @@ async def create_account(
         api_secret_encrypted=api_secret_enc,
         api_key_hash=key_hash,
         status=AccountStatus.IDLE,
-        auto_trade_enabled=False
+        auto_trade_enabled=False,
     )
     db.add(new_account)
     await db.flush()
@@ -117,14 +127,14 @@ async def create_account(
     default_settings = AccountSettings(
         account_id=new_account.id,
         config=DEFAULT_STRATEGY_CONFIG,
-        updated_by=workspace_member.user_id
+        updated_by=workspace_member.user_id,
     )
     db.add(default_settings)
     await db.commit()
 
     # Eagerly load the settings relationship to avoid async lazy-load crash
-    stmt = select(Account).where(Account.id == new_account.id).options(
-        selectinload(Account.settings)
+    stmt = (
+        select(Account).where(Account.id == new_account.id).options(selectinload(Account.settings))
     )
     result = await db.execute(stmt)
     account_with_settings = result.scalars().first()
@@ -135,12 +145,13 @@ async def create_account(
 @router.get("/", response_model=list[AccountResponse])
 async def list_accounts(
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(Account).where(
-        Account.workspace_id == workspace_member.workspace_id,
-        Account.deleted_at.is_(None)
-    ).options(selectinload(Account.settings))
+    stmt = (
+        select(Account)
+        .where(Account.workspace_id == workspace_member.workspace_id, Account.deleted_at.is_(None))
+        .options(selectinload(Account.settings))
+    )
     result = await db.execute(stmt)
     accounts = result.scalars().all()
     return accounts
@@ -149,7 +160,7 @@ async def list_accounts(
 @router.get("/platform-trading-status", response_model=PlatformSettingsResponse)
 async def get_platform_trading_status(
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Check if platform trading is enabled (readable by any authenticated user)."""
     result = await db.execute(
@@ -166,14 +177,14 @@ async def get_platform_trading_status(
 async def get_account(
     account_id: uuid.UUID,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Account).where(Account.id == account_id).options(selectinload(Account.settings))
     result = await db.execute(stmt)
     account = result.scalars().first()
     if not account or account.deleted_at or account.workspace_id != workspace_member.workspace_id:
         raise HTTPException(status_code=404, detail="Account not found")
-    
+
     return account
 
 
@@ -182,7 +193,7 @@ async def update_account(
     account_id: uuid.UUID,
     account_in: AccountUpdate,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     if workspace_member.role not in [WorkspaceRole.OWNER, WorkspaceRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Not enough permissions to update accounts")
@@ -208,9 +219,10 @@ async def update_account(
 async def delete_account(
     account_id: uuid.UUID,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     if workspace_member.role not in [WorkspaceRole.OWNER, WorkspaceRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Not enough permissions to delete accounts")
 
@@ -218,7 +230,7 @@ async def delete_account(
     if not account or account.deleted_at or account.workspace_id != workspace_member.workspace_id:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    account.deleted_at = datetime.now(timezone.utc)
+    account.deleted_at = datetime.now(UTC)
     account.status = AccountStatus.HALTED
     account.auto_trade_enabled = False
     await db.commit()
@@ -229,7 +241,7 @@ async def toggle_auto_trade(
     account_id: uuid.UUID,
     body: AutoTradeToggle,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Toggle auto-trade for an account. Cannot enable if platform trading is disabled."""
     account = await db.get(Account, account_id)
@@ -243,16 +255,16 @@ async def toggle_auto_trade(
         )
         setting = result.scalar_one_or_none()
         platform_trading_on = setting and (setting.value is True or setting.value == "true")
-        
+
         if not platform_trading_on:
             raise HTTPException(
                 status_code=403,
-                detail="Platform trading is currently disabled by the administrator. Cannot enable auto-trade."
+                detail="Platform trading is currently disabled by the administrator. Cannot enable auto-trade.",
             )
 
     account.auto_trade_enabled = body.enabled
     await db.commit()
-    
+
     stmt = select(Account).where(Account.id == account_id).options(selectinload(Account.settings))
     result = await db.execute(stmt)
     return result.scalars().first()
@@ -262,7 +274,7 @@ async def toggle_auto_trade(
 async def start_trading(
     account_id: uuid.UUID,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Set account status to RUNNING and enable auto-trade."""
     account = await db.get(Account, account_id)
@@ -275,17 +287,16 @@ async def start_trading(
     )
     setting = result.scalar_one_or_none()
     platform_trading_on = setting and (setting.value is True or setting.value == "true")
-    
+
     if not platform_trading_on:
         raise HTTPException(
-            status_code=403,
-            detail="Platform trading is currently disabled by the administrator."
+            status_code=403, detail="Platform trading is currently disabled by the administrator."
         )
 
     account.status = AccountStatus.RUNNING
     account.auto_trade_enabled = True
     await db.commit()
-    
+
     stmt = select(Account).where(Account.id == account_id).options(selectinload(Account.settings))
     result = await db.execute(stmt)
     return result.scalars().first()
@@ -295,7 +306,7 @@ async def start_trading(
 async def stop_trading(
     account_id: uuid.UUID,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Set account status to PAUSED and disable auto-trade."""
     account = await db.get(Account, account_id)
@@ -305,7 +316,7 @@ async def stop_trading(
     account.status = AccountStatus.PAUSED
     account.auto_trade_enabled = False
     await db.commit()
-    
+
     stmt = select(Account).where(Account.id == account_id).options(selectinload(Account.settings))
     result = await db.execute(stmt)
     return result.scalars().first()
@@ -315,7 +326,7 @@ async def stop_trading(
 async def emergency_close(
     account_id: uuid.UUID,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Cancel all orders and close all positions for an account. Halt account."""
     account = await db.get(Account, account_id)
@@ -328,6 +339,7 @@ async def emergency_close(
 
     # Get all active symbols for this account
     from app.core.symbols import normalize_active_symbols
+
     config = account.settings.config if account.settings else {}
     active_syms = normalize_active_symbols(config)
 
@@ -356,7 +368,7 @@ async def emergency_close(
 async def test_connection(
     account_id: uuid.UUID,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     account = await db.get(Account, account_id)
     if not account or account.deleted_at or account.workspace_id != workspace_member.workspace_id:
@@ -366,40 +378,48 @@ async def test_connection(
     api_secret = decrypt_secret(account.api_secret_encrypted)
 
     client = BinanceClient(api_key=api_key, api_secret=api_secret, is_testnet=account.is_testnet)
-    
+
     try:
         data = await client.verify_credentials()
         return {"status": "success", "message": "Connection verified successfully.", "data": data}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail="Invalid API credentials or insufficient permissions")
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail="Invalid API credentials or insufficient permissions"
+        ) from None
     except Exception as e:
         logger.error(f"Connection test failed for account {account_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to connect to Binance API")
+        raise HTTPException(status_code=500, detail="Failed to connect to Binance API") from e
+
 
 @router.post("/test-connection/preview")
 async def test_connection_preview(
     req: ConnectionTestRequest,
-    workspace_member: WorkspaceMember = Depends(get_current_workspace_member)
+    workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
 ):
     if workspace_member.role not in [WorkspaceRole.OWNER, WorkspaceRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Not enough permissions")
 
-    client = BinanceClient(api_key=req.api_key, api_secret=req.api_secret, is_testnet=req.is_testnet)
+    client = BinanceClient(
+        api_key=req.api_key, api_secret=req.api_secret, is_testnet=req.is_testnet
+    )
     try:
         data = await client.verify_credentials()
         return {"status": "success", "message": "Connection verified successfully.", "data": data}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail="Invalid API credentials or insufficient permissions")
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail="Invalid API credentials or insufficient permissions"
+        ) from None
     except Exception as e:
         logger.error(f"Connection preview test failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to connect to Binance API")
+        raise HTTPException(status_code=500, detail="Failed to connect to Binance API") from e
+
 
 @router.patch("/{account_id}/settings", response_model=AccountSettingsResponse)
 async def update_account_settings(
     account_id: uuid.UUID,
     settings_in: AccountSettingsUpdate,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     if workspace_member.role not in [WorkspaceRole.OWNER, WorkspaceRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Not enough permissions")
@@ -417,9 +437,7 @@ async def update_account_settings(
     if not settings:
         # Create settings if they don't exist
         settings = AccountSettings(
-            account_id=account_id,
-            config=settings_in.config,
-            updated_by=workspace_member.user_id
+            account_id=account_id, config=settings_in.config, updated_by=workspace_member.user_id
         )
         db.add(settings)
     else:
@@ -432,7 +450,13 @@ async def update_account_settings(
 
     # ── Normalize active_symbols (backward compat: active_symbol → active_symbols) ──
     final_config = settings.config
-    from app.core.symbols import normalize_active_symbols, SUPPORTED_SYMBOLS_SET, MAX_ACTIVE_SYMBOLS, get_symbol_meta
+    from app.core.symbols import (
+        MAX_ACTIVE_SYMBOLS,
+        SUPPORTED_SYMBOLS_SET,
+        get_symbol_meta,
+        normalize_active_symbols,
+    )
+
     active_syms = normalize_active_symbols(final_config)
     if not active_syms:
         active_syms = ["BTCUSDT"]
@@ -460,7 +484,11 @@ async def update_account_settings(
 
     for symbol in active_syms:
         meta = get_symbol_meta(symbol)
-        mins = {"min_qty": meta["min_qty"], "min_notional": meta["min_notional"], "price_approx": meta["price_approx"]}
+        mins = {
+            "min_qty": meta["min_qty"],
+            "min_notional": meta["min_notional"],
+            "price_approx": meta["price_approx"],
+        }
 
         if sizing_mode == "fixed_usd":
             bo_notional = base_order_usd * leverage
@@ -497,11 +525,12 @@ async def update_account_settings(
 
     return settings
 
+
 @router.get("/{account_id}/dashboard")
 async def get_account_dashboard(
     account_id: uuid.UUID,
     workspace_member: WorkspaceMember = Depends(get_current_workspace_member),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     # ── DB phase: extract everything we need, then release the session ──
     account = await db.get(Account, account_id)
@@ -542,7 +571,7 @@ async def get_account_dashboard(
         recent_trades, income = await asyncio.gather(
             client.get_trade_history(limit=50),
             client.get_income_history(limit=50),
-            return_exceptions=True
+            return_exceptions=True,
         )
 
         # For positions/balances/orders: use cache if available, otherwise REST
@@ -551,7 +580,7 @@ async def get_account_dashboard(
                 client.get_position_info() if cached_positions is None else asyncio.sleep(0),
                 client.get_balances() if cached_balances is None else asyncio.sleep(0),
                 client.get_open_orders() if cached_orders is None else asyncio.sleep(0),
-                return_exceptions=True
+                return_exceptions=True,
             )
         else:
             positions_rest = None
@@ -564,7 +593,9 @@ async def get_account_dashboard(
                 return default
             return res
 
-        positions = cached_positions if cached_positions is not None else handle_res(positions_rest, [])
+        positions = (
+            cached_positions if cached_positions is not None else handle_res(positions_rest, [])
+        )
         balances = cached_balances if cached_balances is not None else handle_res(balances_rest, [])
         open_orders = cached_orders if cached_orders is not None else handle_res(orders_rest, [])
         recent_trades = handle_res(recent_trades, [])
@@ -572,7 +603,11 @@ async def get_account_dashboard(
 
         # Filter out zero balances
         if isinstance(balances, list):
-            balances = [b for b in balances if float(b.get("balance", 0)) > 0 or float(b.get("crossUnRealizedPNL", 0)) != 0]
+            balances = [
+                b
+                for b in balances
+                if float(b.get("balance", 0)) > 0 or float(b.get("crossUnRealizedPNL", 0)) != 0
+            ]
 
         # Filter out zero positions
         if isinstance(positions, list):
@@ -580,17 +615,27 @@ async def get_account_dashboard(
 
         return {
             "account_summary": {
-                "total_wallet_balance": account_info.get("totalWalletBalance", "0") if isinstance(account_info, dict) else "0",
-                "total_unrealized_pnl": account_info.get("totalUnrealizedProfit", "0") if isinstance(account_info, dict) else "0",
-                "total_margin_balance": account_info.get("totalMarginBalance", "0") if isinstance(account_info, dict) else "0",
-                "available_balance": account_info.get("availableBalance", "0") if isinstance(account_info, dict) else "0",
+                "total_wallet_balance": account_info.get("totalWalletBalance", "0")
+                if isinstance(account_info, dict)
+                else "0",
+                "total_unrealized_pnl": account_info.get("totalUnrealizedProfit", "0")
+                if isinstance(account_info, dict)
+                else "0",
+                "total_margin_balance": account_info.get("totalMarginBalance", "0")
+                if isinstance(account_info, dict)
+                else "0",
+                "available_balance": account_info.get("availableBalance", "0")
+                if isinstance(account_info, dict)
+                else "0",
             },
             "balances": balances,
             "positions": positions,
             "open_orders": open_orders,
             "recent_trades": recent_trades,
-            "income_history": income
+            "income_history": income,
         }
     except Exception as e:
         logger.error(f"Failed to load dashboard for account {account_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve live data from Binance")
+        raise HTTPException(
+            status_code=500, detail="Failed to retrieve live data from Binance"
+        ) from e

@@ -35,7 +35,7 @@ async function proxyRequest(req: NextRequest, { params }: { params: { path: stri
     const fetchOptions: RequestInit = {
       method: req.method,
       headers,
-      // @ts-ignore - duplex needed for streaming request bodies
+      // @ts-expect-error - duplex needed for streaming request bodies
       duplex: "half",
     };
 

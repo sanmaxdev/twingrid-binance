@@ -7,17 +7,21 @@ POST /subscriptions/subscribe    - Subscribe/upgrade to a plan
 POST /subscriptions/cancel       - Cancel subscription (at period end)
 GET  /subscriptions/invoices     - List billing history
 """
-import uuid
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
 
-from app.api.deps import get_db, get_current_user
-from app.models.user import User
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db
 from app.models.subscription_invoice import SubscriptionInvoice
+from app.models.user import User
 from app.services.subscription_service import (
-    get_all_plans, get_user_subscription, get_user_plan,
-    subscribe, cancel_subscription, check_backtest_access,
+    cancel_subscription,
+    check_backtest_access,
+    get_all_plans,
+    get_user_plan,
+    get_user_subscription,
+    subscribe,
 )
 
 router = APIRouter()
@@ -50,11 +54,10 @@ async def get_current_subscription(
     db: AsyncSession = Depends(get_db),
 ):
     """Return current subscription state, effective plan, and feature access."""
-    from datetime import datetime, timezone
+
     sub = await get_user_subscription(db, current_user.id)
     plan = await get_user_plan(db, current_user.id)
     backtest = await check_backtest_access(db, current_user.id)
-    now = datetime.now(timezone.utc)
 
     return {
         "subscription": {
@@ -62,8 +65,12 @@ async def get_current_subscription(
             "plan_id": sub.plan_id,
             "status": sub.status,
             "started_at": sub.started_at.isoformat() if sub.started_at else None,
-            "current_period_start": sub.current_period_start.isoformat() if sub.current_period_start else None,
-            "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
+            "current_period_start": sub.current_period_start.isoformat()
+            if sub.current_period_start
+            else None,
+            "current_period_end": sub.current_period_end.isoformat()
+            if sub.current_period_end
+            else None,
             "grace_period_end": sub.grace_period_end.isoformat() if sub.grace_period_end else None,
             "cancel_at_period_end": sub.cancel_at_period_end,
             "cancelled_at": sub.cancelled_at.isoformat() if sub.cancelled_at else None,
