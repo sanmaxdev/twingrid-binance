@@ -8,6 +8,10 @@ updates:
     open-pull-requests-limit: 5
     groups:
       backend:
+        applies-to: version-updates
+        patterns: ["*"]
+      backend-security:
+        applies-to: security-updates
         patterns: ["*"]
     ignore:
       # Major bumps are handled manually (they often need code changes).
@@ -25,6 +29,10 @@ updates:
     open-pull-requests-limit: 5
     groups:
       frontend:
+        applies-to: version-updates
+        patterns: ["*"]
+      frontend-security:
+        applies-to: security-updates
         patterns: ["*"]
     ignore:
       - dependency-name: "*"
@@ -41,6 +49,10 @@ updates:
     open-pull-requests-limit: 5
     groups:
       actions:
+        applies-to: version-updates
+        patterns: ["*"]
+      actions-security:
+        applies-to: security-updates
         patterns: ["*"]
     ignore:
       - dependency-name: "*"
