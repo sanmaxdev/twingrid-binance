@@ -1,0 +1,50 @@
+# TWIN GRID Console — Production Caddy Config
+# Cloudflare SSL mode: Full (accepts self-signed origin certs)
+# Using tls internal (Caddy self-signed) — no Let's Encrypt renewal failures.
+# Cloudflare handles public TLS for users; Caddy handles Cloudflare→EC2 leg.
+
+twingridbot.com, www.twingridbot.com {
+
+    # Self-signed cert — works with Cloudflare Full mode, no renewal failures
+    tls internal
+
+    # Request body size limit
+    request_body {
+        max_size 10MB
+    }
+
+    # WebSocket upgrade (must be before the /api/* catch-all)
+    handle /api/v1/ws {
+        reverse_proxy backend:8000
+    }
+
+    # API backend
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            transport http {
+                read_timeout 300s
+                write_timeout 300s
+            }
+        }
+    }
+
+    # Frontend (Next.js) — catch-all
+    handle /* {
+        reverse_proxy frontend:3000
+    }
+
+    # Security headers
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy strict-origin-when-cross-origin
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/access.log
+        format json
+    }
+}

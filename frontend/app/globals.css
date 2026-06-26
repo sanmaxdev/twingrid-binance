@@ -1,0 +1,154 @@
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Binance-inspired Design System — Dark Mode */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+@layer base {
+  .theme {
+    --font-heading: 'Inter', Arial, sans-serif;
+    --font-sans: 'Inter', Arial, sans-serif;
+  }
+
+  :root {
+    /* Binance Dark Mode Palette */
+    --background: #181A20;
+    --foreground: #EAECEF;
+    --card: #1E2026;
+    --card-foreground: #EAECEF;
+    --popover: #1E2026;
+    --popover-foreground: #EAECEF;
+    --primary: #F0B90B;
+    --primary-foreground: #1E2026;
+    --secondary: #2B2F36;
+    --secondary-foreground: #EAECEF;
+    --muted: #2B2F36;
+    --muted-foreground: #848E9C;
+    --accent: #2B2F36;
+    --accent-foreground: #EAECEF;
+    --destructive: #F6465D;
+    --destructive-foreground: #FFFFFF;
+    --border: #2B2F36;
+    --input: #2B2F36;
+    --ring: #F0B90B;
+
+    /* Chart colors — yellow/gold spectrum */
+    --chart-1: #F0B90B;
+    --chart-2: #0ECB81;
+    --chart-3: #F6465D;
+    --chart-4: #FFD000;
+    --chart-5: #848E9C;
+
+    --radius: 0.75rem;
+
+    /* Sidebar */
+    --sidebar: #1E2026;
+    --sidebar-foreground: #EAECEF;
+    --sidebar-primary: #F0B90B;
+    --sidebar-primary-foreground: #1E2026;
+    --sidebar-accent: #2B2F36;
+    --sidebar-accent-foreground: #EAECEF;
+    --sidebar-border: #2B2F36;
+    --sidebar-ring: #F0B90B;
+
+    /* Semantic */
+    --crypto-green: #0ECB81;
+    --crypto-red: #F6465D;
+    --binance-yellow: #F0B90B;
+    --binance-gold: #FFD000;
+    --binance-dark: #181A20;
+    --binance-panel: #1E2026;
+    --binance-card: #2B2F36;
+    --binance-card-hover: #363A45;
+    --slate-text: #848E9C;
+    --steel-text: #5E6673;
+  }
+
+  /* Light mode — still dark, Binance doesn't do light trading UIs */
+  .dark {
+    --background: #181A20;
+    --foreground: #EAECEF;
+    --card: #1E2026;
+    --card-foreground: #EAECEF;
+    --popover: #1E2026;
+    --popover-foreground: #EAECEF;
+    --primary: #F0B90B;
+    --primary-foreground: #1E2026;
+    --secondary: #2B2F36;
+    --secondary-foreground: #EAECEF;
+    --muted: #2B2F36;
+    --muted-foreground: #848E9C;
+    --accent: #2B2F36;
+    --accent-foreground: #EAECEF;
+    --destructive: #F6465D;
+    --destructive-foreground: #FFFFFF;
+    --border: #2B2F36;
+    --input: #2B2F36;
+    --ring: #F0B90B;
+    --chart-1: #F0B90B;
+    --chart-2: #0ECB81;
+    --chart-3: #F6465D;
+    --chart-4: #FFD000;
+    --chart-5: #848E9C;
+    --sidebar: #1E2026;
+    --sidebar-foreground: #EAECEF;
+    --sidebar-primary: #F0B90B;
+    --sidebar-primary-foreground: #1E2026;
+    --sidebar-accent: #2B2F36;
+    --sidebar-accent-foreground: #EAECEF;
+    --sidebar-border: #2B2F36;
+    --sidebar-ring: #F0B90B;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  
+  input, textarea, [contenteditable="true"] {
+    user-select: auto;
+    -webkit-user-select: auto;
+  }
+  
+  html {
+    font-family: 'Inter', Arial, sans-serif;
+  }
+
+  /* Selection color */
+  ::selection {
+    background: rgba(240, 185, 11, 0.25);
+    color: #EAECEF;
+  }
+
+  /* Scrollbar — Binance dark style */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #181A20;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2B2F36;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #363A45;
+  }
+}
