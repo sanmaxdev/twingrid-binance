@@ -1,0 +1,5 @@
+# Code owners are automatically requested for review on every pull request.
+# Combined with branch protection ("Require review from Code Owners"), this
+# ensures every PR needs the owner's approval before it can be merged.
+
+* @sanmaxdev
