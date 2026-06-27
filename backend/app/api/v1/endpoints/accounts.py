@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import get_current_workspace_member
 from app.core.database import get_db
 from app.core.enums import AccountStatus, WorkspaceRole
+from app.core.logging import scrub
 from app.core.security import decrypt_secret, encrypt_secret
 from app.models.account import Account
 from app.models.platform_settings import PlatformSettings
@@ -63,7 +64,11 @@ DEFAULT_STRATEGY_CONFIG = {
 
 
 def _hash_api_key(api_key: str) -> str:
-    """Generate a SHA256 hash of the API key for duplicate detection."""
+    """Non-reversible fingerprint of an API key, used only for duplicate detection.
+
+    The key itself is high-entropy and is stored separately encrypted at rest
+    (Fernet/AES), so a fast hash here is sufficient and not a password-style risk.
+    """
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
 
 
@@ -387,7 +392,7 @@ async def test_connection(
             status_code=400, detail="Invalid API credentials or insufficient permissions"
         ) from None
     except Exception as e:
-        logger.error(f"Connection test failed for account {account_id}: {e}")
+        logger.error(f"Connection test failed for account {scrub(account_id)}: {scrub(e)}")
         raise HTTPException(status_code=500, detail="Failed to connect to Binance API") from e
 
 
@@ -562,7 +567,7 @@ async def get_account_dashboard(
                 account_info_raw = await asyncio.wait_for(client.get_account_info(), timeout=10.0)
                 account_info = account_info_raw if isinstance(account_info_raw, dict) else {}
             except Exception as e:
-                logger.warning(f"REST account_info failed for {account_id}: {e}")
+                logger.warning(f"REST account_info failed for {scrub(account_id)}: {scrub(e)}")
                 account_info = {}
         else:
             account_info = cached_account_info
@@ -635,7 +640,7 @@ async def get_account_dashboard(
             "income_history": income,
         }
     except Exception as e:
-        logger.error(f"Failed to load dashboard for account {account_id}: {str(e)}")
+        logger.error(f"Failed to load dashboard for account {scrub(account_id)}: {scrub(e)}")
         raise HTTPException(
             status_code=500, detail="Failed to retrieve live data from Binance"
         ) from e

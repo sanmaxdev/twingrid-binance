@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import require_admin
+from app.core.logging import scrub
 from app.models.user import User
 
 router = APIRouter()
@@ -229,7 +230,8 @@ async def prune_docker_build_cache(
                 results.append({"step": step, "success": False, "output": str(e)})
 
     except Exception as e:
-        results.append({"step": "docker_sdk", "success": False, "output": str(e)})
+        logger.warning(f"Docker SDK prune failed: {scrub(e)}")
+        results.append({"step": "docker_sdk", "success": False, "output": "prune failed"})
 
     freed_gb = round(total_freed_bytes / (1024**3), 2)
     freed_mb = round(total_freed_bytes / (1024**2), 1)

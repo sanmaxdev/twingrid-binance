@@ -28,6 +28,11 @@ class MemoryLogHandler(logging.Handler):
 log_buffer = MemoryLogHandler(capacity=2000)
 
 
+def scrub(value: object) -> str:
+    """Strip CR/LF from untrusted values before logging to prevent log forging."""
+    return str(value).replace("\r", " ").replace("\n", " ")
+
+
 def setup_logging():
     # Setup standard python logging to route to structlog
     logging.basicConfig(level=logging.INFO, format="%(message)s")

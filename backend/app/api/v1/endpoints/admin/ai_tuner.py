@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin, require_super_admin
 from app.core.database import get_db
+from app.core.logging import scrub
 from app.models.ai_tuner_session import AiTunerSession
 from app.models.user import User
 from app.services.gemini_agent import run_agent
@@ -200,7 +201,10 @@ async def run_ai_tuner(
 
         except Exception as e:
             final_status = "failed"
-            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+            import structlog
+
+            structlog.get_logger().error(f"AI tuner stream failed: {scrub(e)}")
+            yield f"event: error\ndata: {json.dumps({'message': 'AI tuner run failed'})}\n\n"
 
         # Update session in DB
         try:

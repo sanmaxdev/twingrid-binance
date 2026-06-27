@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require_admin
 from app.core.enums import AccountStatus
+from app.core.logging import scrub
 from app.core.security import decrypt_secret
 from app.models.account import Account
 from app.models.platform_settings import PlatformSettings
@@ -342,7 +343,7 @@ async def get_account_dashboard_admin(
                 account_info_raw = await asyncio.wait_for(client.get_account_info(), timeout=10.0)
                 account_info = account_info_raw if isinstance(account_info_raw, dict) else {}
             except Exception as e:
-                logger.warning(f"REST account_info failed for {account_id}: {e}")
+                logger.warning(f"REST account_info failed for {scrub(account_id)}: {scrub(e)}")
                 account_info = {}
         else:
             account_info = cached_account_info
@@ -418,7 +419,7 @@ async def get_account_dashboard_admin(
             "income_history": income,
         }
     except Exception as e:
-        logger.error(f"Failed to load dashboard for account {account_id}: {str(e)}")
+        logger.error(f"Failed to load dashboard for account {scrub(account_id)}: {scrub(e)}")
         raise HTTPException(
             status_code=500, detail="Failed to retrieve live data from Binance"
         ) from e
@@ -471,7 +472,7 @@ async def get_account_balance_admin(
             "available_balance": account_info.get("availableBalance"),
         }
     except TimeoutError:
-        logger.warning(f"Balance fetch timed out for account {account_id}")
+        logger.warning(f"Balance fetch timed out for account {scrub(account_id)}")
         return {
             "success": False,
             "total_wallet_balance": None,
@@ -479,7 +480,7 @@ async def get_account_balance_admin(
             "available_balance": None,
         }
     except Exception as e:
-        logger.warning(f"Balance fetch failed for account {account_id}: {e}")
+        logger.warning(f"Balance fetch failed for account {scrub(account_id)}: {scrub(e)}")
         return {
             "success": False,
             "total_wallet_balance": None,
@@ -653,7 +654,7 @@ async def close_account_position_admin(
                     symbol=symbol, side=side, quantity=abs_amt, reduce_only=True
                 )
                 logger.info(
-                    f"Admin manually closed position for {symbol} on account {account_id}. Size: {amt}"
+                    f"Admin manually closed position for {scrub(symbol)} on account {scrub(account_id)}. Size: {scrub(amt)}"
                 )
 
         # Close any open baskets in the DB
@@ -689,7 +690,9 @@ async def close_account_position_admin(
         return {"success": True, "message": f"Successfully closed position for {symbol}."}
 
     except Exception as e:
-        logger.error(f"Failed to manually close position {symbol} for account {account_id}: {e}")
+        logger.error(
+            f"Failed to manually close position {scrub(symbol)} for account {scrub(account_id)}: {scrub(e)}"
+        )
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
@@ -756,7 +759,9 @@ async def update_account_settings_admin(
     await db.commit()
     await db.refresh(settings)
 
-    logger.info(f"Admin {current_user.email} updated settings for account {account_id}")
+    logger.info(
+        f"Admin {scrub(current_user.email)} updated settings for account {scrub(account_id)}"
+    )
 
     return {
         "account_id": str(settings.account_id),
