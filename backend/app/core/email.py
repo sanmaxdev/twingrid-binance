@@ -19,15 +19,6 @@ from app.core.logging import scrub
 logger = logging.getLogger(__name__)
 
 
-def _mask_email(email: object) -> str:
-    """Redact an email address for logging so PII is not stored in plain text."""
-    try:
-        local, domain = str(email).split("@", 1)
-        return f"{local[:1]}***@{domain}"
-    except ValueError:
-        return "***"
-
-
 # Resend API endpoint
 RESEND_API_URL = "https://api.resend.com/emails"
 
@@ -50,9 +41,7 @@ async def send_email(to_email: str, subject: str, html_content: str) -> bool:
         success = await _send_via_smtp(to_email, subject, html_content)
     else:
         error_msg = "No email provider configured"
-        logger.warning(
-            f"No email provider configured. Would have sent to {_mask_email(to_email)}: {scrub(subject)}"
-        )
+        logger.warning(f"No email provider configured. Would have sent: {scrub(subject)}")
 
     # Keep in-memory cache
     email_log.append(
@@ -110,13 +99,13 @@ async def _send_via_resend(to_email: str, subject: str, html_content: str) -> bo
                 },
             )
             if response.status_code in (200, 201):
-                logger.info(f"✉️ Email sent via Resend to {_mask_email(to_email)}: {scrub(subject)}")
+                logger.info(f"✉️ Email sent via Resend: {scrub(subject)}")
                 return True
             else:
                 logger.error(f"Resend API error {response.status_code}: {scrub(response.text)}")
                 return False
     except Exception as e:
-        logger.error(f"Failed to send email via Resend to {_mask_email(to_email)}: {scrub(e)}")
+        logger.error(f"Failed to send email via Resend: {scrub(e)}")
         return False
 
 
@@ -138,10 +127,10 @@ async def _send_via_smtp(to_email: str, subject: str, html_content: str) -> bool
             use_tls=settings.SMTP_USE_TLS,
             start_tls=False if settings.SMTP_PORT == 1025 else True,
         )
-        logger.info(f"✉️ Email sent via SMTP to {_mask_email(to_email)}: {scrub(subject)}")
+        logger.info(f"✉️ Email sent via SMTP: {scrub(subject)}")
         return True
     except Exception as e:
-        logger.error(f"Failed to send email via SMTP to {_mask_email(to_email)}: {scrub(e)}")
+        logger.error(f"Failed to send email via SMTP: {scrub(e)}")
         return False
 
 

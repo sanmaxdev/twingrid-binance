@@ -227,7 +227,8 @@ async def prune_docker_build_cache(
                     {"step": step, "success": code == 0, "output": (out + err).strip()[:300]}
                 )
             except Exception as e:
-                results.append({"step": step, "success": False, "output": str(e)})
+                logger.warning(f"Docker {step} failed: {scrub(e)}")
+                results.append({"step": step, "success": False, "output": "prune failed"})
 
     except Exception as e:
         logger.warning(f"Docker SDK prune failed: {scrub(e)}")

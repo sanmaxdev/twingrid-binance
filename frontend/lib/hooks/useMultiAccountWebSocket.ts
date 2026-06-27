@@ -99,9 +99,17 @@ export function useMultiAccountWebSocket(accountIds: string[]) {
           const channel: string = msg.channel || "";
           const accountId = channel.replace("account:", "");
 
-          // Only accept account IDs we actually subscribed to. This prevents a
-          // malicious channel value from injecting arbitrary object keys.
-          if (!accountId || !accountIdsRef.current.includes(accountId)) return;
+          // Reject empty, prototype-polluting, or unsubscribed ids before using
+          // accountId as an object key.
+          if (
+            !accountId ||
+            accountId === "__proto__" ||
+            accountId === "constructor" ||
+            accountId === "prototype" ||
+            !accountIdsRef.current.includes(accountId)
+          ) {
+            return;
+          }
 
           if (msg.type === "account_update" && msg.data) {
             setLiveMap((prev) => ({

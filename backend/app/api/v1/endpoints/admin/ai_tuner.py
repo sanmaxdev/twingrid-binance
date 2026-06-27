@@ -196,8 +196,12 @@ async def run_ai_tuner(
                 elif event_type == "error":
                     final_status = "failed"
 
-                # Yield SSE event
-                yield f"event: {event_type}\ndata: {json.dumps(event_data, default=str)}\n\n"
+                # Yield SSE event. Error payloads can carry raw exception text,
+                # so send a generic message to the client and keep details in logs.
+                if event_type == "error":
+                    yield f"event: error\ndata: {json.dumps({'message': 'AI tuner step failed'})}\n\n"
+                else:
+                    yield f"event: {event_type}\ndata: {json.dumps(event_data, default=str)}\n\n"
 
         except Exception as e:
             final_status = "failed"
