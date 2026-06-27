@@ -158,8 +158,8 @@ async def prune_docker_build_cache(
             freed = r.get("SpaceReclaimed", 0) or 0
             total_freed_bytes += freed
             results.append({"step": "containers_prune", "success": True, "freed_bytes": freed})
-        except Exception as e:
-            results.append({"step": "containers_prune", "success": False, "output": str(e)})
+        except Exception:
+            results.append({"step": "containers_prune", "success": False, "output": "prune failed"})
 
         # 2. Prune dangling images
         try:
@@ -167,8 +167,10 @@ async def prune_docker_build_cache(
             freed = r.get("SpaceReclaimed", 0) or 0
             total_freed_bytes += freed
             results.append({"step": "images_prune_dangling", "success": True, "freed_bytes": freed})
-        except Exception as e:
-            results.append({"step": "images_prune_dangling", "success": False, "output": str(e)})
+        except Exception:
+            results.append(
+                {"step": "images_prune_dangling", "success": False, "output": "prune failed"}
+            )
 
         # 3. Prune all unused images (not just dangling)
         try:
@@ -176,8 +178,8 @@ async def prune_docker_build_cache(
             freed = r.get("SpaceReclaimed", 0) or 0
             total_freed_bytes += freed
             results.append({"step": "images_prune_all", "success": True, "freed_bytes": freed})
-        except Exception as e:
-            results.append({"step": "images_prune_all", "success": False, "output": str(e)})
+        except Exception:
+            results.append({"step": "images_prune_all", "success": False, "output": "prune failed"})
 
         # 4. Prune build cache via low-level API
         try:
@@ -185,15 +187,17 @@ async def prune_docker_build_cache(
             freed = resp.get("SpaceReclaimed", 0) or 0
             total_freed_bytes += freed
             results.append({"step": "build_cache_prune", "success": True, "freed_bytes": freed})
-        except Exception as e:
-            results.append({"step": "build_cache_prune", "success": False, "output": str(e)})
+        except Exception:
+            results.append(
+                {"step": "build_cache_prune", "success": False, "output": "prune failed"}
+            )
 
         # 5. Prune unused networks
         try:
             client.networks.prune()
             results.append({"step": "networks_prune", "success": True})
-        except Exception as e:
-            results.append({"step": "networks_prune", "success": False, "output": str(e)})
+        except Exception:
+            results.append({"step": "networks_prune", "success": False, "output": "prune failed"})
 
         client.close()
 

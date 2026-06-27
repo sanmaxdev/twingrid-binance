@@ -41,7 +41,7 @@ async def send_email(to_email: str, subject: str, html_content: str) -> bool:
         success = await _send_via_smtp(to_email, subject, html_content)
     else:
         error_msg = "No email provider configured"
-        logger.warning(f"No email provider configured. Would have sent: {scrub(subject)}")
+        logger.warning("No email provider configured; email not sent")
 
     # Keep in-memory cache
     email_log.append(
@@ -99,7 +99,7 @@ async def _send_via_resend(to_email: str, subject: str, html_content: str) -> bo
                 },
             )
             if response.status_code in (200, 201):
-                logger.info(f"✉️ Email sent via Resend: {scrub(subject)}")
+                logger.info("✉️ Email sent via Resend")
                 return True
             else:
                 logger.error(f"Resend API error {response.status_code}: {scrub(response.text)}")
@@ -127,7 +127,7 @@ async def _send_via_smtp(to_email: str, subject: str, html_content: str) -> bool
             use_tls=settings.SMTP_USE_TLS,
             start_tls=False if settings.SMTP_PORT == 1025 else True,
         )
-        logger.info(f"✉️ Email sent via SMTP: {scrub(subject)}")
+        logger.info("✉️ Email sent via SMTP")
         return True
     except Exception as e:
         logger.error(f"Failed to send email via SMTP: {scrub(e)}")
