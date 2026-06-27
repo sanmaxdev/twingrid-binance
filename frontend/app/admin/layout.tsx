@@ -91,7 +91,7 @@ function AdminSidebar({ isOpen, onClose }: { isOpen: boolean; onClose: () => voi
   );
 
   /** Profile card + popup — shared between desktop & mobile */
-  const ProfileSection = ({ sectionRef }: { sectionRef: React.RefObject<HTMLDivElement> }) => (
+  const ProfileSection = ({ sectionRef }: { sectionRef: React.RefObject<HTMLDivElement | null> }) => (
     <div className="border-t border-[#2B2F36] relative" ref={sectionRef}>
       {/* Popup */}
       {userMenuOpen && (

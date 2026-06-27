@@ -8,8 +8,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 const BACKEND_URL = process.env.BACKEND_INTERNAL_URL || "http://localhost:8000";
 
-async function proxyRequest(req: NextRequest, { params }: { params: { path: string[] } }) {
-  const path = params.path.join("/");
+async function proxyRequest(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
+  const path = (await params).path.join("/");
   const url = new URL(`/api/${path}`, BACKEND_URL);
 
   // Forward query params
